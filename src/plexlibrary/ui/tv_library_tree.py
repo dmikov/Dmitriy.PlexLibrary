@@ -30,13 +30,16 @@ from plexlibrary.services.library_db_service import LibraryDbError, LibraryDbSer
 from plexlibrary.services.metadata_service import MetadataError, TmdbMetadataService
 from plexlibrary.services.ui_layout_state import (
     bind_header_state_tracking,
+    finalize_stretch_column,
     restore_header_state,
 )
 from plexlibrary.ui.show_metadata_panel import ShowMetadataPanel
 
-_SHOW_HEADERS = ["", "Show", "Year", "Seasons"]
+_SHOW_HEADERS = ["", "Show", "Year", "Seasons", ""]
+_SHOW_SPACER_COLUMN = len(_SHOW_HEADERS) - 1
 _SEASON_HEADERS = ["", "Season"]
 _EPISODE_HEADERS = ["Episode #", "Title", "Resolution"]
+_TABLE_HORIZONTAL_MARGIN = 20
 _HEADER_STYLESHEET = """
 QHeaderView::section {
     background-color: #1976D2;
@@ -51,8 +54,17 @@ QHeaderView::section:hover {
     background-color: #1565C0;
 }
 """
+_SHOW_TABLE_STYLESHEET = (
+    _HEADER_STYLESHEET
+    + """
+QTableWidget QHeaderView::section:last {
+    background-color: transparent;
+    border: none;
+}
+"""
+)
 _EXPAND_COLUMN_WIDTH = 28
-_DETAIL_MARGINS = (20, 4, 0, 8)
+_DETAIL_MARGINS = (_TABLE_HORIZONTAL_MARGIN, 4, _TABLE_HORIZONTAL_MARGIN, 8)
 _DEFAULT_ROW_HEIGHT = 30
 
 
@@ -102,11 +114,14 @@ def _configure_material_table(
     default_widths: list[int],
     *,
     fixed_expand_column: bool = False,
+    stretch_column: int | None = None,
+    stretch_column_min_width: int = _TABLE_HORIZONTAL_MARGIN,
     header_state: str = "",
+    table_stylesheet: str = _HEADER_STYLESHEET,
 ) -> None:
     table.setColumnCount(len(headers))
     table.setHorizontalHeaderLabels(headers)
-    table.setStyleSheet(_HEADER_STYLESHEET)
+    table.setStyleSheet(table_stylesheet)
     table.setAlternatingRowColors(True)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
     table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -117,10 +132,16 @@ def _configure_material_table(
     header = table.horizontalHeader()
     header.setStretchLastSection(False)
     header.setSectionsMovable(True)
+    if stretch_column is not None:
+        header.setMinimumSectionSize(stretch_column_min_width)
+    else:
+        header.setMinimumSectionSize(40)
     header.setDefaultSectionSize(120)
-    header.setMinimumSectionSize(40)
     for column in range(len(headers)):
-        if fixed_expand_column and column == 0:
+        if stretch_column is not None and column == stretch_column:
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+            table.setColumnWidth(column, stretch_column_min_width)
+        elif fixed_expand_column and column == 0:
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             table.setColumnWidth(column, _EXPAND_COLUMN_WIDTH)
         else:
@@ -128,8 +149,18 @@ def _configure_material_table(
     for column, width in enumerate(default_widths):
         if fixed_expand_column and column == 0:
             continue
+        if stretch_column is not None and column == stretch_column:
+            continue
         table.setColumnWidth(column, width)
     restore_header_state(header, header_state)
+    if stretch_column is not None:
+        finalize_stretch_column(header, stretch_column, stretch_column_min_width)
+
+
+def _make_blank_spacer_item() -> QTableWidgetItem:
+    item = _make_item("", selectable=False)
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+    return item
 
 
 def _make_item(text: str, *, selectable: bool = True) -> QTableWidgetItem:
@@ -400,12 +431,38 @@ class ShowTableWidget(QTableWidget):
         _configure_material_table(
             self,
             _SHOW_HEADERS,
-            [_EXPAND_COLUMN_WIDTH, 420, 90, 110],
+            [_EXPAND_COLUMN_WIDTH, 420, 90, 110, _TABLE_HORIZONTAL_MARGIN],
             fixed_expand_column=True,
+            stretch_column=_SHOW_SPACER_COLUMN,
             header_state=show_header_state,
+            table_stylesheet=_SHOW_TABLE_STYLESHEET,
         )
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        header = self.horizontalHeader()
+        header.sectionMoved.connect(self._keep_spacer_column_last)
         bind_header_state_tracking(self.horizontalHeader(), self._handle_show_header_changed)
         self.cellClicked.connect(self._on_cell_clicked)
+        self._ensure_spacer_column()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        self._ensure_spacer_column()
+
+    def _keep_spacer_column_last(
+        self,
+        logical_index: int,
+        old_visual_index: int,
+        new_visual_index: int,
+    ) -> None:
+        del logical_index, old_visual_index, new_visual_index
+        self._ensure_spacer_column()
+
+    def _ensure_spacer_column(self) -> None:
+        finalize_stretch_column(
+            self.horizontalHeader(),
+            _SHOW_SPACER_COLUMN,
+            _TABLE_HORIZONTAL_MARGIN,
+        )
 
     def show_header_state(self) -> str:
         return self._show_header_state
@@ -422,6 +479,7 @@ class ShowTableWidget(QTableWidget):
 
     def _handle_show_header_changed(self, state: str) -> None:
         self._show_header_state = state
+        self._ensure_spacer_column()
         self._notify_layout_changed()
 
     def _handle_season_header_changed(self, state: str) -> None:
@@ -445,6 +503,8 @@ class ShowTableWidget(QTableWidget):
             year = str(show.year) if show.year is not None else ""
             self.setItem(row, 2, _make_item(year, selectable=False))
             self.setItem(row, 3, _make_item(str(show.season_count), selectable=False))
+            self.setItem(row, _SHOW_SPACER_COLUMN, _make_blank_spacer_item())
+        self._ensure_spacer_column()
 
     def _show_for_row(self, row: int) -> TvShowSummary | None:
         name_item = self.item(row, 1)

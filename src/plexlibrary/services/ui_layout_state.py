@@ -27,6 +27,16 @@ def restore_header_state(header: QHeaderView, state: str) -> bool:
     return header.restoreState(decode_bytes(state))
 
 
+def finalize_stretch_column(header: QHeaderView, stretch_column: int, min_width: int) -> None:
+    """Re-apply stretch mode after restoreState() so filler columns stay pinned on the right."""
+    header.setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
+    header.resizeSection(stretch_column, min_width)
+    spacer_visual = header.visualIndex(stretch_column)
+    last_visual = header.count() - 1
+    if spacer_visual != last_visual:
+        header.moveSection(spacer_visual, last_visual)
+
+
 def save_window_geometry(window: QWidget) -> str:
     return encode_bytes(window.saveGeometry())
 
