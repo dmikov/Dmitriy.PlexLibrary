@@ -1,0 +1,24 @@
+---
+description: PlexLibrary architecture, layout persistence, and TV grid conventions
+alwaysApply: true
+---
+
+# PlexLibrary Context
+
+Read `context.md` at the project root for the full reference. Key facts:
+
+- PySide6 desktop app; run with `uv run plexlibrary`
+- Settings: `~/.config/PlexLibrary/settings.json`; secrets in OS keyring
+- DB via local/SMB/SFTP/Plex diagnostics; ZIP extract uses `databaseBackup.db*`
+- TV grid: nested `QTableWidget`s (show → season → episode), lazy-loaded on expand
+- Show columns: ▶, Show, Year, Seasons, blank stretch spacer (20px min, pinned last)
+- Detail row margins: 20px left and right (`_TABLE_HORIZONTAL_MARGIN`)
+- Layout persisted in `AppSettings.ui_layout` (window geometry, library id, three header states)
+- Save layout on main window close and before Settings; restore on launch
+- Live layout: `bind_header_state_tracking()` updates shared state for newly expanded rows
+- After header restore, call `finalize_stretch_column()` so spacer column stays stretch
+- Settings dialog must preserve `existing.ui_layout` when saving connections
+- TMDb metadata panel on show expand; API key optional (keyring)
+- Plex types: metadata 2/3/4 = show/season/episode; section_type 2 = TV
+
+Main files: `ui/main_window.py`, `ui/tv_library_tree.py`, `services/ui_layout_state.py`, `models/ui_layout.py`
