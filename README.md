@@ -33,12 +33,17 @@ turns orange to flag the mismatch — a quick way to spot shows where your Plex
 library is missing (or has extra) seasons compared to TMDb. Hovering the TMDb
 Seasons cell shows the actual season sequence TMDb reports (e.g. specials as
 season `0`). Expanding a show applies the same orange-text treatment per season
-when its Plex and TMDb episode counts disagree.
+when its Plex and TMDb episode counts disagree — and adds a row (in red) for any
+season TMDb knows about that has no matching season in your Plex library at all.
+A missing season still shows TMDb's episode count, just nothing in the Plex
+episode-count column — there's nothing there to report.
 
 Expanding a season goes one level further: the episode grid shows each episode's
 filename alongside its title and resolution, and adds a row (in red) for any
 episode TMDb knows about that isn't in your Plex library — a quick way to spot
-gaps. Missing episodes obviously have no filename or resolution to show.
+gaps. Missing episodes obviously have no filename or resolution to show. A
+missing season's episode grid is red across the board, since none of its
+episodes are in Plex either.
 
 Click the **⟳** icon at the start of a row to force a hard refresh of that show's
 TMDb data, bypassing the cache described below.

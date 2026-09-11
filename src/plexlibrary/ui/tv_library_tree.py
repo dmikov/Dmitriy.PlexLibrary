@@ -51,7 +51,10 @@ _SEASON_NAME_COLUMN = 1
 _SEASON_EPISODE_COUNT_COLUMN = 2
 _SEASON_TMDB_EPISODE_COLUMN = 3
 _MISMATCH_TEXT_COLOR = QColor(255, 140, 0)
-_MISSING_EPISODE_TEXT_COLOR = QColor(198, 40, 40)
+_MISSING_TEXT_COLOR = QColor(198, 40, 40)
+# Synthetic TvSeasonRecord.id for a season TMDb reports that has no Plex season at all.
+# Plex metadata_items ids are always positive, so a large negative offset can't collide.
+_MISSING_SEASON_ID_OFFSET = 1_000_000_000
 _EPISODE_HEADERS = ["Episode #", "Title", "Filename", "Resolution"]
 _EPISODE_NUMBER_COLUMN = 0
 _EPISODE_TITLE_COLUMN = 1
@@ -265,11 +268,6 @@ class EpisodeTableWidget(QTableWidget):
         self._populate()
         _fit_table_to_contents(self)
 
-    def update_tmdb_episodes(self, tmdb_episodes: list[TvEpisodeMetadata]) -> None:
-        """Refresh the missing-episode rows once TMDb episode data arrives or is force-refreshed."""
-        self._tmdb_episodes = tmdb_episodes
-        self._populate()
-
     def _populate(self) -> None:
         rows = _merge_episode_rows(self._episodes, self._tmdb_episodes)
         self.setRowCount(len(rows))
@@ -283,12 +281,37 @@ class EpisodeTableWidget(QTableWidget):
                 self._set_row_missing(row)
 
     def _set_row_missing(self, row: int) -> None:
-        brush = QBrush(_MISSING_EPISODE_TEXT_COLOR)
+        brush = QBrush(_MISSING_TEXT_COLOR)
         for column in range(self.columnCount()):
             item = self.item(row, column)
             if item is not None:
                 item.setForeground(brush)
                 item.setToolTip("Reported by TMDb but missing from Plex.")
+
+
+def _missing_season_id(season_number: int) -> int:
+    return -(_MISSING_SEASON_ID_OFFSET + season_number)
+
+
+def _merge_seasons_with_missing(
+    plex_seasons: list[TvSeasonRecord],
+    tmdb_seasons: dict[int, TvSeasonMetadata] | None,
+) -> tuple[list[TvSeasonRecord], set[int]]:
+    """Plex's seasons plus a synthetic entry for any TMDb season with no matching Plex season."""
+
+    seasons = list(plex_seasons)
+    missing_ids: set[int] = set()
+    if tmdb_seasons:
+        plex_numbers = {season.season_number for season in plex_seasons if season.season_number is not None}
+        for season_number in tmdb_seasons:
+            if season_number in plex_numbers:
+                continue
+            missing_id = _missing_season_id(season_number)
+            # Missing from Plex: no local episodes, so there's nothing to show in the Episodes column.
+            seasons.append(TvSeasonRecord(id=missing_id, season_number=season_number, episodes=[]))
+            missing_ids.add(missing_id)
+    seasons.sort(key=lambda season: season.season_number if season.season_number is not None else -1)
+    return seasons, missing_ids
 
 
 class SeasonTableWidget(QTableWidget):
@@ -307,13 +330,14 @@ class SeasonTableWidget(QTableWidget):
         tmdb_seasons: dict[int, TvSeasonMetadata] | None = None,
     ) -> None:
         super().__init__(parent)
-        self._seasons = seasons
+        self._plex_seasons = seasons
         self._expanded_rows: dict[int, int] = {}
         self._on_geometry_changed = on_geometry_changed
         self._episode_header_state = episode_header_state
         self._on_season_header_state_changed = on_season_header_state_changed
         self._on_episode_header_state_changed = on_episode_header_state_changed
         self._tmdb_seasons = tmdb_seasons
+        self._seasons, self._missing_season_ids = _merge_seasons_with_missing(seasons, tmdb_seasons)
         _configure_material_table(
             self,
             _SEASON_HEADERS,
@@ -349,32 +373,45 @@ class SeasonTableWidget(QTableWidget):
         return tmdb_season.episodes if tmdb_season is not None else []
 
     def update_tmdb_seasons(self, tmdb_seasons: dict[int, TvSeasonMetadata]) -> None:
-        """Refresh the TMDb episode-count column (and mismatch tint) once TMDb data arrives."""
+        """Rebuild the season list (incl. any newly-known missing seasons) once TMDb data arrives."""
         self._tmdb_seasons = tmdb_seasons
-        for season in self._seasons:
-            row = self._find_row_for_season(season.id)
-            if row is not None:
-                self._apply_row_episode_metadata(row, season)
-            episode_table = self._episode_table_for_season(season.id)
-            if episode_table is not None:
-                episode_table.update_tmdb_episodes(self._tmdb_episodes_for(season))
+        expanded_season_numbers = {
+            season.season_number
+            for data_row in self._expanded_rows
+            if (season := self._season_for_row(data_row)) is not None and season.season_number is not None
+        }
+
+        self._seasons, self._missing_season_ids = _merge_seasons_with_missing(self._plex_seasons, tmdb_seasons)
+        self._expanded_rows.clear()
+        # Drop any rows still hanging around from before (detail rows included) — setRowCount() to a
+        # smaller count alone would truncate from the end rather than specifically dropping those.
+        self.setRowCount(0)
+        self._populate()
+
+        for season_number in expanded_season_numbers:
+            row = self._find_row_for_season_number(season_number)
+            if row is None:
+                continue
+            season = self._season_for_row(row)
+            if season is not None and (season.episodes or self._tmdb_episodes_for(season)):
+                self._expand_row(row, season)
+
         self.sync_geometry()
 
-    def _episode_table_for_season(self, season_id: int) -> EpisodeTableWidget | None:
-        row = self._find_row_for_season(season_id)
-        if row is None:
-            return None
-        detail_row = self._expanded_rows.get(row)
-        if detail_row is None:
-            return None
-        container = self.cellWidget(detail_row, 0)
-        if container is None:
-            return None
-        return container.findChild(EpisodeTableWidget)
+    def _find_row_for_season_number(self, season_number: int) -> int | None:
+        # Reads the live table (not self._seasons by index) since rows already re-expanded in this
+        # same pass have shifted subsequent row indices by inserting a detail row.
+        for row in range(self.rowCount()):
+            season = self._season_for_row(row)
+            if season is not None and season.season_number == season_number:
+                return row
+        return None
 
     def _apply_row_episode_metadata(self, row: int, season: TvSeasonRecord) -> None:
+        is_missing = season.id in self._missing_season_ids
         plex_count = len(season.episodes)
-        self.setItem(row, _SEASON_EPISODE_COUNT_COLUMN, _make_item(str(plex_count), selectable=False))
+        plex_text = "—" if is_missing else str(plex_count)
+        self.setItem(row, _SEASON_EPISODE_COUNT_COLUMN, _make_item(plex_text, selectable=False))
 
         tmdb_season = (
             self._tmdb_seasons.get(season.season_number)
@@ -390,6 +427,10 @@ class SeasonTableWidget(QTableWidget):
         else:
             tmdb_item.setText("…")
         self.setItem(row, _SEASON_TMDB_EPISODE_COLUMN, tmdb_item)
+
+        if is_missing:
+            self._set_row_missing_season(row)
+            return
 
         mismatch = self._tmdb_seasons is not None and (
             tmdb_season is None or tmdb_season.episode_count != plex_count
@@ -408,6 +449,19 @@ class SeasonTableWidget(QTableWidget):
             if item is not None:
                 item.setForeground(brush)
 
+    def _set_row_missing_season(self, row: int) -> None:
+        brush = QBrush(_MISSING_TEXT_COLOR)
+        for column in (
+            _SEASON_EXPAND_COLUMN,
+            _SEASON_NAME_COLUMN,
+            _SEASON_EPISODE_COUNT_COLUMN,
+            _SEASON_TMDB_EPISODE_COLUMN,
+        ):
+            item = self.item(row, column)
+            if item is not None:
+                item.setForeground(brush)
+                item.setToolTip("Reported by TMDb but missing from Plex.")
+
     def _season_for_row(self, row: int) -> TvSeasonRecord | None:
         name_item = self.item(row, _SEASON_NAME_COLUMN)
         if name_item is None:
@@ -418,15 +472,6 @@ class SeasonTableWidget(QTableWidget):
         for season in self._seasons:
             if season.id == season_id:
                 return season
-        return None
-
-    def _find_row_for_season(self, season_id: int) -> int | None:
-        for row in range(self.rowCount()):
-            name_item = self.item(row, _SEASON_NAME_COLUMN)
-            if name_item is None:
-                continue
-            if name_item.data(Qt.ItemDataRole.UserRole) == season_id:
-                return row
         return None
 
     def _on_cell_clicked(self, row: int, column: int) -> None:
