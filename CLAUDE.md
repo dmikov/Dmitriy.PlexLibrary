@@ -77,12 +77,14 @@ headers, lazy-loaded on expand via a background thread:
 | Level | Columns |
 |-------|---------|
 | Show | ▶, ⟳, Show, Year, Seasons, TMDb Seasons, *(blank stretch spacer)* |
-| Season | ▶, Season |
+| Season | ▶, Season, Episodes, TMDb Episodes |
 | Episode | Episode #, Title, Resolution |
 
-Show table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_SHOW_NAME_COLUMN`,
-`_SHOW_YEAR_COLUMN`, `_SHOW_SEASON_COUNT_COLUMN`, `_SHOW_TMDB_SEASON_COLUMN`, `_SHOW_SPACER_COLUMN`)
-— use those rather than hardcoding column numbers if you touch `ShowTableWidget`.
+Show/season table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_SHOW_NAME_COLUMN`,
+`_SHOW_YEAR_COLUMN`, `_SHOW_SEASON_COUNT_COLUMN`, `_SHOW_TMDB_SEASON_COLUMN`, `_SHOW_SPACER_COLUMN`,
+`_SEASON_EXPAND_COLUMN`, `_SEASON_NAME_COLUMN`, `_SEASON_EPISODE_COUNT_COLUMN`,
+`_SEASON_TMDB_EPISODE_COLUMN`) — use those rather than hardcoding column numbers if you touch
+`ShowTableWidget`/`SeasonTableWidget`.
 
 - Expand column fixed at 28px; other columns interactive/movable; expand state uses manual ▶/▼
   text icons, not `QTreeWidgetItem` indicators
@@ -115,6 +117,25 @@ Show table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_SHOW_NA
   `_keep_spacer_column_last` and header-state tracking (`bind_header_state_tracking`) — without the
   guard this can cascade deep enough to blow the recursion limit, especially with a stale saved
   header state from before the column count changed
+
+### TMDb episode-count columns on the season grid (`ui/tv_library_tree.py`)
+
+- `ShowTableWidget` keeps `self._show_metadata: dict[int, TvShowMetadata]`, populated by
+  `update_show_metadata()` — the single entry point called from three places: the bulk season
+  summary sweep, a row's hard refresh, and (via `TvLibraryTreeWidget._on_metadata_loaded`) the
+  full-metadata fetch triggered by expanding a show. Whichever fires first wins; later ones refresh
+  the same state
+- `SeasonTableWidget` is constructed with `tmdb_seasons: dict[season_number, TvSeasonMetadata] | None`
+  built from that cached metadata (`None` means "not fetched yet" → `…` placeholder, no tint; an
+  empty/partial dict means "fetched, but TMDb doesn't have this season" → `?`, tinted as a mismatch)
+- If TMDb data arrives *after* a season table is already open, `update_show_metadata()` locates the
+  live `SeasonTableWidget` via `_season_table_for_show()` (`cellWidget` lookup on the expanded detail
+  row) and calls `season_table.update_tmdb_seasons(...)` to refresh it in place
+- Mismatch here is **font color**, not background — `_set_row_episode_mismatch()` uses
+  `item.setForeground(QBrush(_EPISODE_MISMATCH_TEXT_COLOR))` (orange) across the season row's static
+  columns, reset via a bare `QBrush()`. This is a different visual treatment from the show grid's
+  row-background tint (`_set_row_mismatch_tint` / `_SEASON_MISMATCH_COLOR`) — don't conflate the two
+  when editing either
 
 ### UI layout persistence
 

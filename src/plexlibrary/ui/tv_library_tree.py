@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from plexlibrary.models.library import LibrarySection
-from plexlibrary.models.metadata import TvShowMetadata
+from plexlibrary.models.metadata import TvSeasonMetadata, TvShowMetadata
 from plexlibrary.models.tv import (
     PLEX_SECTION_TYPE_SHOW,
     TvEpisodeRecord,
@@ -45,7 +45,12 @@ _SHOW_SEASON_COUNT_COLUMN = 4
 _SHOW_TMDB_SEASON_COLUMN = 5
 _SHOW_SPACER_COLUMN = len(_SHOW_HEADERS) - 1
 _SEASON_MISMATCH_COLOR = QColor(54, 35, 0)
-_SEASON_HEADERS = ["", "Season"]
+_SEASON_HEADERS = ["", "Season", "Episodes", "TMDb Episodes"]
+_SEASON_EXPAND_COLUMN = 0
+_SEASON_NAME_COLUMN = 1
+_SEASON_EPISODE_COUNT_COLUMN = 2
+_SEASON_TMDB_EPISODE_COLUMN = 3
+_EPISODE_MISMATCH_TEXT_COLOR = QColor(255, 140, 0)
 _EPISODE_HEADERS = ["Episode #", "Title", "Resolution"]
 _TABLE_HORIZONTAL_MARGIN = 20
 _HEADER_STYLESHEET = """
@@ -238,6 +243,7 @@ class SeasonTableWidget(QTableWidget):
         episode_header_state: str = "",
         on_season_header_state_changed: Callable[[str], None] | None = None,
         on_episode_header_state_changed: Callable[[str], None] | None = None,
+        tmdb_seasons: dict[int, TvSeasonMetadata] | None = None,
     ) -> None:
         super().__init__(parent)
         self._seasons = seasons
@@ -246,10 +252,11 @@ class SeasonTableWidget(QTableWidget):
         self._episode_header_state = episode_header_state
         self._on_season_header_state_changed = on_season_header_state_changed
         self._on_episode_header_state_changed = on_episode_header_state_changed
+        self._tmdb_seasons = tmdb_seasons
         _configure_material_table(
             self,
             _SEASON_HEADERS,
-            [_EXPAND_COLUMN_WIDTH, 260],
+            [_EXPAND_COLUMN_WIDTH, 220, 90, 130],
             fixed_expand_column=True,
             header_state=header_state,
         )
@@ -263,18 +270,63 @@ class SeasonTableWidget(QTableWidget):
         self.setRowCount(len(self._seasons))
         for row, season in enumerate(self._seasons):
             if season.episodes:
-                self.setItem(row, 0, _make_item(_expand_icon(False)))
+                self.setItem(row, _SEASON_EXPAND_COLUMN, _make_item(_expand_icon(False)))
             else:
-                self.setItem(row, 0, _make_item("", selectable=False))
+                self.setItem(row, _SEASON_EXPAND_COLUMN, _make_item("", selectable=False))
             season_label = (
                 f"Season {season.season_number}" if season.season_number is not None else "Season"
             )
             name_item = _make_item(season_label, selectable=False)
             name_item.setData(Qt.ItemDataRole.UserRole, season.id)
-            self.setItem(row, 1, name_item)
+            self.setItem(row, _SEASON_NAME_COLUMN, name_item)
+            self._apply_row_episode_metadata(row, season)
+
+    def update_tmdb_seasons(self, tmdb_seasons: dict[int, TvSeasonMetadata]) -> None:
+        """Refresh the TMDb episode-count column (and mismatch tint) once TMDb data arrives."""
+        self._tmdb_seasons = tmdb_seasons
+        for season in self._seasons:
+            row = self._find_row_for_season(season.id)
+            if row is not None:
+                self._apply_row_episode_metadata(row, season)
+
+    def _apply_row_episode_metadata(self, row: int, season: TvSeasonRecord) -> None:
+        plex_count = len(season.episodes)
+        self.setItem(row, _SEASON_EPISODE_COUNT_COLUMN, _make_item(str(plex_count), selectable=False))
+
+        tmdb_season = (
+            self._tmdb_seasons.get(season.season_number)
+            if self._tmdb_seasons is not None and season.season_number is not None
+            else None
+        )
+        tmdb_item = _make_item("", selectable=False)
+        if tmdb_season is not None:
+            tmdb_item.setText(str(tmdb_season.episode_count))
+        elif self._tmdb_seasons is not None:
+            tmdb_item.setText("?")
+            tmdb_item.setToolTip("TMDb has no matching season.")
+        else:
+            tmdb_item.setText("…")
+        self.setItem(row, _SEASON_TMDB_EPISODE_COLUMN, tmdb_item)
+
+        mismatch = self._tmdb_seasons is not None and (
+            tmdb_season is None or tmdb_season.episode_count != plex_count
+        )
+        self._set_row_episode_mismatch(row, mismatch)
+
+    def _set_row_episode_mismatch(self, row: int, mismatch: bool) -> None:
+        brush = QBrush(_EPISODE_MISMATCH_TEXT_COLOR) if mismatch else QBrush()
+        for column in (
+            _SEASON_EXPAND_COLUMN,
+            _SEASON_NAME_COLUMN,
+            _SEASON_EPISODE_COUNT_COLUMN,
+            _SEASON_TMDB_EPISODE_COLUMN,
+        ):
+            item = self.item(row, column)
+            if item is not None:
+                item.setForeground(brush)
 
     def _season_for_row(self, row: int) -> TvSeasonRecord | None:
-        name_item = self.item(row, 1)
+        name_item = self.item(row, _SEASON_NAME_COLUMN)
         if name_item is None:
             return None
         season_id = name_item.data(Qt.ItemDataRole.UserRole)
@@ -285,8 +337,17 @@ class SeasonTableWidget(QTableWidget):
                 return season
         return None
 
+    def _find_row_for_season(self, season_id: int) -> int | None:
+        for row in range(self.rowCount()):
+            name_item = self.item(row, _SEASON_NAME_COLUMN)
+            if name_item is None:
+                continue
+            if name_item.data(Qt.ItemDataRole.UserRole) == season_id:
+                return row
+        return None
+
     def _on_cell_clicked(self, row: int, column: int) -> None:
-        if column != 0:
+        if column != _SEASON_EXPAND_COLUMN:
             return
         season = self._season_for_row(row)
         if season is None or not season.episodes:
@@ -494,6 +555,7 @@ class ShowTableWidget(QTableWidget):
         self._expanded_rows: dict[int, int] = {}
         self._detail_threads: dict[int, QThread] = {}
         self._detail_workers: dict[int, _TvShowDetailsWorker] = {}
+        self._show_metadata: dict[int, TvShowMetadata] = {}
         self._summary_thread: QThread | None = None
         self._summary_worker: _ShowMetadataFetchWorker | None = None
         self._refresh_threads: dict[int, QThread] = {}
@@ -707,8 +769,31 @@ class ShowTableWidget(QTableWidget):
             thread.wait()
 
     def _on_show_metadata_ready(self, show_id: int, metadata: TvShowMetadata) -> None:
-        self._apply_tmdb_season_metadata(show_id, metadata)
+        self.update_show_metadata(show_id, metadata)
         self.show_metadata_refreshed.emit(show_id, metadata)
+
+    def update_show_metadata(self, show_id: int, metadata: TvShowMetadata) -> None:
+        """Apply freshly fetched TMDb metadata to the show row and, if expanded, its season grid."""
+        self._show_metadata[show_id] = metadata
+        self._apply_tmdb_season_metadata(show_id, metadata)
+        season_table = self._season_table_for_show(show_id)
+        if season_table is not None:
+            tmdb_seasons = {
+                season.season_number: season for season in metadata.seasons if season.season_number is not None
+            }
+            season_table.update_tmdb_seasons(tmdb_seasons)
+
+    def _season_table_for_show(self, show_id: int) -> SeasonTableWidget | None:
+        data_row = self._find_row_for_show(show_id)
+        if data_row is None:
+            return None
+        detail_row = self._expanded_rows.get(data_row)
+        if detail_row is None:
+            return None
+        container = self.cellWidget(detail_row, 0)
+        if container is None:
+            return None
+        return container.findChild(SeasonTableWidget)
 
     def _on_show_metadata_failed(self, show_id: int, message: str) -> None:
         row = self._find_row_for_show(show_id)
@@ -832,6 +917,16 @@ class ShowTableWidget(QTableWidget):
         if data_row is None or data_row not in self._expanded_rows:
             return
         if seasons:
+            show_metadata = self._show_metadata.get(show_id)
+            tmdb_seasons = (
+                {
+                    season.season_number: season
+                    for season in show_metadata.seasons
+                    if season.season_number is not None
+                }
+                if show_metadata is not None
+                else None
+            )
             season_table = SeasonTableWidget(
                 seasons,
                 self,
@@ -840,6 +935,7 @@ class ShowTableWidget(QTableWidget):
                 episode_header_state=self._episode_header_state,
                 on_season_header_state_changed=self._handle_season_header_changed,
                 on_episode_header_state_changed=self._handle_episode_header_changed,
+                tmdb_seasons=tmdb_seasons,
             )
             self._replace_detail_widget(data_row, season_table)
         else:
@@ -1024,6 +1120,8 @@ class TvLibraryTreeWidget(QWidget):
             self._metadata_show_id = None
 
     def _on_metadata_loaded(self, show_id: int, metadata: TvShowMetadata, poster_bytes: bytes | None) -> None:
+        if self._show_table is not None:
+            self._show_table.update_show_metadata(show_id, metadata)
         if show_id != self._metadata_show_id:
             return
         self._metadata_panel.set_metadata(metadata, poster_bytes)
