@@ -8,6 +8,8 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field
 
+from plexlibrary.models.ui_layout import UiLayoutSettings
+
 
 class ConnectionType(StrEnum):
     """The transport used to reach the Plex database file."""
@@ -102,3 +104,4 @@ class AppSettings(BaseModel):
     download_destination: str = Field(
         default_factory=lambda: str(Path.home() / "PlexLibrary" / "downloaded" / "com.plexapp.plugins.library.db")
     )
+    ui_layout: UiLayoutSettings = Field(default_factory=UiLayoutSettings)

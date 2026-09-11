@@ -15,6 +15,7 @@ from plexlibrary.models.connection import (
 
 APP_NAME = "PlexLibrary"
 KEYRING_SERVICE = "PlexLibrary"
+TMDB_API_KEY_ACCOUNT = "tmdb-api-key"
 
 
 class SettingsService:
@@ -63,3 +64,21 @@ class SettingsService:
 
     def save_password(self, connection: ConnectionSettings, password: str) -> None:
         self.save_credentials(connection, password)
+
+    def load_tmdb_api_key(self) -> str:
+        """Read the TMDb API key from the OS keyring, if one has been saved."""
+        try:
+            return keyring.get_password(KEYRING_SERVICE, TMDB_API_KEY_ACCOUNT) or ""
+        except keyring.errors.KeyringError:
+            return ""
+
+    def save_tmdb_api_key(self, api_key: str) -> bool:
+        """Store the TMDb API key in the OS keyring. Returns False if keyring storage failed."""
+        try:
+            if api_key:
+                keyring.set_password(KEYRING_SERVICE, TMDB_API_KEY_ACCOUNT, api_key)
+            else:
+                keyring.delete_password(KEYRING_SERVICE, TMDB_API_KEY_ACCOUNT)
+        except keyring.errors.KeyringError:
+            return False
+        return True

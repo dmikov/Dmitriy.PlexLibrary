@@ -1,43 +1,42 @@
-"""Expandable TV show grid backed by the local Plex database."""
+"""Expandable TV show grids with independent tables per hierarchy level."""
 
 from __future__ import annotations
 
-from enum import StrEnum
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHeaderView,
     QLabel,
-    QTreeWidget,
-    QTreeWidgetItem,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from plexlibrary.models.library import LibrarySection
-from plexlibrary.models.tv import PLEX_SECTION_TYPE_SHOW, TvSeasonRecord, TvShowSummary
+from plexlibrary.models.metadata import TvShowMetadata
+from plexlibrary.models.tv import (
+    PLEX_SECTION_TYPE_SHOW,
+    TvEpisodeRecord,
+    TvSeasonRecord,
+    TvShowSummary,
+)
+from plexlibrary.models.ui_layout import UiLayoutSettings
 from plexlibrary.services.library_db_service import LibraryDbError, LibraryDbService
+from plexlibrary.services.metadata_service import MetadataError, TmdbMetadataService
+from plexlibrary.services.ui_layout_state import (
+    bind_header_state_tracking,
+    restore_header_state,
+)
+from plexlibrary.ui.show_metadata_panel import ShowMetadataPanel
 
-ROLE_ITEM_KIND = Qt.ItemDataRole.UserRole
-ROLE_SHOW_ID = Qt.ItemDataRole.UserRole + 1
-ROLE_DETAILS_LOADED = Qt.ItemDataRole.UserRole + 2
-_DATA_COLUMN = 0
-
-
-class _TreeItemKind(StrEnum):
-    SHOW = "show"
-    SEASON = "season"
-    EPISODE = "episode"
-    HEADER = "header"
-
-
-_SHOW_HEADERS = ["Show", "Year", "Seasons"]
-_SEASON_HEADERS = ["Season", "", ""]
+_SHOW_HEADERS = ["", "Show", "Year", "Seasons"]
+_SEASON_HEADERS = ["", "Season"]
 _EPISODE_HEADERS = ["Episode #", "Title", "Resolution"]
-_HEADER_BACKGROUND = QColor("#1976D2")  # Material Blue 700
-_HEADER_FOREGROUND = QColor("#FFFFFF")
 _HEADER_STYLESHEET = """
 QHeaderView::section {
     background-color: #1976D2;
@@ -52,6 +51,548 @@ QHeaderView::section:hover {
     background-color: #1565C0;
 }
 """
+_EXPAND_COLUMN_WIDTH = 28
+_DETAIL_MARGINS = (20, 4, 0, 8)
+_DEFAULT_ROW_HEIGHT = 30
+
+
+def _fit_table_to_contents(table: QTableWidget) -> int:
+    """Size a nested table to its rows and return the pixel height it needs."""
+
+    table.resizeRowsToContents()
+    table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    if table.rowCount() == 0:
+        height = table.horizontalHeader().height() + table.frameWidth() * 2
+    else:
+        height = table.horizontalHeader().height() + table.frameWidth() * 2
+        for row in range(table.rowCount()):
+            height += max(table.rowHeight(row), _DEFAULT_ROW_HEIGHT)
+
+    table.setFixedHeight(height)
+    return height
+
+
+def _detail_container_height(content_height: int) -> int:
+    top, _, _, bottom = _DETAIL_MARGINS
+    return content_height + top + bottom
+
+
+def _wrap_detail_widget(parent: QWidget, widget: QWidget) -> tuple[QWidget, int]:
+    container = QWidget(parent)
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(*_DETAIL_MARGINS)
+    layout.setSpacing(0)
+    layout.addWidget(widget)
+    content_height = widget.height() if widget.height() > 0 else widget.sizeHint().height()
+    total_height = _detail_container_height(content_height)
+    container.setFixedHeight(total_height)
+    return container, total_height
+
+
+def _expand_icon(expanded: bool) -> str:
+    return "▼" if expanded else "▶"
+
+
+def _configure_material_table(
+    table: QTableWidget,
+    headers: list[str],
+    default_widths: list[int],
+    *,
+    fixed_expand_column: bool = False,
+    header_state: str = "",
+) -> None:
+    table.setColumnCount(len(headers))
+    table.setHorizontalHeaderLabels(headers)
+    table.setStyleSheet(_HEADER_STYLESHEET)
+    table.setAlternatingRowColors(True)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.verticalHeader().setVisible(False)
+    table.setShowGrid(True)
+
+    header = table.horizontalHeader()
+    header.setStretchLastSection(False)
+    header.setSectionsMovable(True)
+    header.setDefaultSectionSize(120)
+    header.setMinimumSectionSize(40)
+    for column in range(len(headers)):
+        if fixed_expand_column and column == 0:
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            table.setColumnWidth(column, _EXPAND_COLUMN_WIDTH)
+        else:
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+    for column, width in enumerate(default_widths):
+        if fixed_expand_column and column == 0:
+            continue
+        table.setColumnWidth(column, width)
+    restore_header_state(header, header_state)
+
+
+def _make_item(text: str, *, selectable: bool = True) -> QTableWidgetItem:
+    item = QTableWidgetItem(text)
+    if not selectable:
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+    return item
+
+
+def _shift_expanded_rows(expanded_rows: dict[int, int], pivot: int, delta: int) -> None:
+    updated: dict[int, int] = {}
+    for key, detail_row in expanded_rows.items():
+        new_key = key + delta if key > pivot else key
+        new_detail = detail_row + delta if detail_row > pivot else detail_row
+        updated[new_key] = new_detail
+    expanded_rows.clear()
+    expanded_rows.update(updated)
+
+
+class EpisodeTableWidget(QTableWidget):
+    """Episode grid with its own three-column header."""
+
+    def __init__(
+        self,
+        episodes: list[TvEpisodeRecord],
+        parent: QWidget | None = None,
+        *,
+        header_state: str = "",
+        on_header_state_changed: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        _configure_material_table(self, _EPISODE_HEADERS, [90, 360, 140], header_state=header_state)
+        if on_header_state_changed is not None:
+            bind_header_state_tracking(self.horizontalHeader(), on_header_state_changed)
+        self.setRowCount(len(episodes))
+        for row, episode in enumerate(episodes):
+            episode_number = str(episode.episode_number) if episode.episode_number is not None else ""
+            self.setItem(row, 0, _make_item(episode_number, selectable=False))
+            self.setItem(row, 1, _make_item(episode.title, selectable=False))
+            self.setItem(row, 2, _make_item(episode.resolution, selectable=False))
+        _fit_table_to_contents(self)
+
+
+class SeasonTableWidget(QTableWidget):
+    """Season grid with expandable episode tables underneath each season."""
+
+    def __init__(
+        self,
+        seasons: list[TvSeasonRecord],
+        parent: QWidget | None = None,
+        *,
+        on_geometry_changed: Callable[[], None] | None = None,
+        header_state: str = "",
+        episode_header_state: str = "",
+        on_season_header_state_changed: Callable[[str], None] | None = None,
+        on_episode_header_state_changed: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._seasons = seasons
+        self._expanded_rows: dict[int, int] = {}
+        self._on_geometry_changed = on_geometry_changed
+        self._episode_header_state = episode_header_state
+        self._on_season_header_state_changed = on_season_header_state_changed
+        self._on_episode_header_state_changed = on_episode_header_state_changed
+        _configure_material_table(
+            self,
+            _SEASON_HEADERS,
+            [_EXPAND_COLUMN_WIDTH, 260],
+            fixed_expand_column=True,
+            header_state=header_state,
+        )
+        if on_season_header_state_changed is not None:
+            bind_header_state_tracking(self.horizontalHeader(), on_season_header_state_changed)
+        self.cellClicked.connect(self._on_cell_clicked)
+        self._populate()
+        self.sync_geometry()
+
+    def _populate(self) -> None:
+        self.setRowCount(len(self._seasons))
+        for row, season in enumerate(self._seasons):
+            if season.episodes:
+                self.setItem(row, 0, _make_item(_expand_icon(False)))
+            else:
+                self.setItem(row, 0, _make_item("", selectable=False))
+            season_label = (
+                f"Season {season.season_number}" if season.season_number is not None else "Season"
+            )
+            name_item = _make_item(season_label, selectable=False)
+            name_item.setData(Qt.ItemDataRole.UserRole, season.id)
+            self.setItem(row, 1, name_item)
+
+    def _season_for_row(self, row: int) -> TvSeasonRecord | None:
+        name_item = self.item(row, 1)
+        if name_item is None:
+            return None
+        season_id = name_item.data(Qt.ItemDataRole.UserRole)
+        if season_id is None:
+            return None
+        for season in self._seasons:
+            if season.id == season_id:
+                return season
+        return None
+
+    def _on_cell_clicked(self, row: int, column: int) -> None:
+        if column != 0:
+            return
+        season = self._season_for_row(row)
+        if season is None or not season.episodes:
+            return
+        if row in self._expanded_rows:
+            self._collapse_row(row)
+        else:
+            self._expand_row(row, season)
+
+    def sync_geometry(self) -> None:
+        self.resizeRowsToContents()
+        for row in range(self.rowCount()):
+            if row not in self._expanded_rows.values():
+                self.setRowHeight(row, max(self.rowHeight(row), _DEFAULT_ROW_HEIGHT))
+
+        for detail_row in self._expanded_rows.values():
+            container = self.cellWidget(detail_row, 0)
+            if container is None:
+                continue
+            episode_table = container.findChild(EpisodeTableWidget)
+            if episode_table is not None:
+                content_height = _fit_table_to_contents(episode_table)
+                total_height = _detail_container_height(content_height)
+                container.setFixedHeight(total_height)
+                self.setRowHeight(detail_row, total_height)
+
+        total_height = self.horizontalHeader().height() + self.frameWidth() * 2
+        for row in range(self.rowCount()):
+            total_height += self.rowHeight(row)
+        self.setFixedHeight(total_height)
+
+        if self._on_geometry_changed is not None:
+            self._on_geometry_changed()
+
+    def _handle_episode_header_changed(self, state: str) -> None:
+        self._episode_header_state = state
+        if self._on_episode_header_state_changed is not None:
+            self._on_episode_header_state_changed(state)
+
+    def _expand_row(self, data_row: int, season: TvSeasonRecord) -> None:
+        _shift_expanded_rows(self._expanded_rows, data_row, 1)
+        insert_row = data_row + 1
+        self.insertRow(insert_row)
+
+        episode_table = EpisodeTableWidget(
+            season.episodes,
+            self,
+            header_state=self._episode_header_state,
+            on_header_state_changed=self._handle_episode_header_changed,
+        )
+        _set_detail_row_widget(self, insert_row, episode_table)
+
+        self._expanded_rows[data_row] = insert_row
+        expand_item = self.item(data_row, 0)
+        if expand_item is not None:
+            expand_item.setText(_expand_icon(True))
+        self.sync_geometry()
+
+    def _collapse_row(self, data_row: int) -> None:
+        detail_row = self._expanded_rows.pop(data_row)
+        self.removeRow(detail_row)
+        _shift_expanded_rows(self._expanded_rows, data_row, -1)
+        expand_item = self.item(data_row, 0)
+        if expand_item is not None:
+            expand_item.setText(_expand_icon(False))
+        self.sync_geometry()
+
+
+def _set_detail_row_widget(table: QTableWidget, detail_row: int, widget: QWidget) -> None:
+    if isinstance(widget, SeasonTableWidget):
+        widget.sync_geometry()
+        content_height = widget.height()
+    elif isinstance(widget, QTableWidget):
+        content_height = _fit_table_to_contents(widget)
+    else:
+        widget.adjustSize()
+        content_height = max(widget.sizeHint().height(), _DEFAULT_ROW_HEIGHT)
+
+    container, total_height = _wrap_detail_widget(table, widget)
+    table.setSpan(detail_row, 0, 1, table.columnCount())
+    table.setCellWidget(detail_row, 0, container)
+    table.setRowHeight(detail_row, total_height)
+
+
+class _TvShowDetailsWorker(QObject):
+    succeeded = Signal(int, list)
+    failed = Signal(int, str)
+
+    def __init__(self, library_db_service: LibraryDbService, show_id: int, db_path: Path) -> None:
+        super().__init__()
+        self._library_db_service = library_db_service
+        self._show_id = show_id
+        self._db_path = db_path
+
+    def run(self) -> None:
+        try:
+            seasons = self._library_db_service.get_show_seasons_and_episodes(self._show_id, self._db_path)
+        except LibraryDbError as exc:
+            self.failed.emit(self._show_id, str(exc))
+        except Exception as exc:
+            self.failed.emit(self._show_id, f"Unexpected error: {exc}")
+        else:
+            self.succeeded.emit(self._show_id, seasons)
+
+
+class _ShowMetadataWorker(QObject):
+    succeeded = Signal(int, object, object)
+    failed = Signal(int, str)
+
+    def __init__(self, metadata_service: TmdbMetadataService, show: TvShowSummary) -> None:
+        super().__init__()
+        self._metadata_service = metadata_service
+        self._show = show
+
+    def run(self) -> None:
+        try:
+            metadata = self._metadata_service.fetch_show_metadata(self._show.name, self._show.year)
+        except MetadataError as exc:
+            self.failed.emit(self._show.id, str(exc))
+            return
+        except Exception as exc:
+            self.failed.emit(self._show.id, f"Unexpected error: {exc}")
+            return
+
+        poster_bytes: bytes | None = None
+        if metadata.poster_url:
+            try:
+                poster_bytes = self._metadata_service.fetch_poster_bytes(metadata.poster_url)
+            except MetadataError:
+                poster_bytes = None
+
+        self.succeeded.emit(self._show.id, metadata, poster_bytes)
+
+
+class ShowTableWidget(QTableWidget):
+    """Top-level show grid; expanding a row embeds an independent season table."""
+
+    show_expanded = Signal(object)
+    show_collapsed = Signal(int)
+
+    def __init__(
+        self,
+        library_db_service: LibraryDbService,
+        db_path: Path,
+        parent: QWidget | None = None,
+        *,
+        show_header_state: str = "",
+        season_header_state: str = "",
+        episode_header_state: str = "",
+        on_layout_changed: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._library_db_service = library_db_service
+        self._db_path = db_path
+        self._shows: list[TvShowSummary] = []
+        self._expanded_rows: dict[int, int] = {}
+        self._detail_threads: dict[int, QThread] = {}
+        self._detail_workers: dict[int, _TvShowDetailsWorker] = {}
+        self._show_header_state = show_header_state
+        self._season_header_state = season_header_state
+        self._episode_header_state = episode_header_state
+        self._on_layout_changed = on_layout_changed
+        _configure_material_table(
+            self,
+            _SHOW_HEADERS,
+            [_EXPAND_COLUMN_WIDTH, 420, 90, 110],
+            fixed_expand_column=True,
+            header_state=show_header_state,
+        )
+        bind_header_state_tracking(self.horizontalHeader(), self._handle_show_header_changed)
+        self.cellClicked.connect(self._on_cell_clicked)
+
+    def show_header_state(self) -> str:
+        return self._show_header_state
+
+    def season_header_state(self) -> str:
+        return self._season_header_state
+
+    def episode_header_state(self) -> str:
+        return self._episode_header_state
+
+    def _notify_layout_changed(self) -> None:
+        if self._on_layout_changed is not None:
+            self._on_layout_changed()
+
+    def _handle_show_header_changed(self, state: str) -> None:
+        self._show_header_state = state
+        self._notify_layout_changed()
+
+    def _handle_season_header_changed(self, state: str) -> None:
+        self._season_header_state = state
+        self._notify_layout_changed()
+
+    def _handle_episode_header_changed(self, state: str) -> None:
+        self._episode_header_state = state
+        self._notify_layout_changed()
+
+    def set_shows(self, shows: list[TvShowSummary]) -> None:
+        self.clear_workers()
+        self._expanded_rows.clear()
+        self._shows = shows
+        self.setRowCount(len(shows))
+        for row, show in enumerate(shows):
+            self.setItem(row, 0, _make_item(_expand_icon(False)))
+            name_item = _make_item(show.name, selectable=False)
+            name_item.setData(Qt.ItemDataRole.UserRole, show.id)
+            self.setItem(row, 1, name_item)
+            year = str(show.year) if show.year is not None else ""
+            self.setItem(row, 2, _make_item(year, selectable=False))
+            self.setItem(row, 3, _make_item(str(show.season_count), selectable=False))
+
+    def _show_for_row(self, row: int) -> TvShowSummary | None:
+        name_item = self.item(row, 1)
+        if name_item is None:
+            return None
+        show_id = name_item.data(Qt.ItemDataRole.UserRole)
+        if show_id is None:
+            return None
+        for show in self._shows:
+            if show.id == show_id:
+                return show
+        return None
+
+    def clear_workers(self) -> None:
+        for thread in self._detail_threads.values():
+            if thread.isRunning():
+                thread.quit()
+                thread.wait()
+        self._detail_threads.clear()
+        self._detail_workers.clear()
+
+    def _find_row_for_show(self, show_id: int) -> int | None:
+        for row in range(self.rowCount()):
+            name_item = self.item(row, 1)
+            if name_item is None:
+                continue
+            if name_item.data(Qt.ItemDataRole.UserRole) == show_id:
+                return row
+        return None
+
+    def _on_cell_clicked(self, row: int, column: int) -> None:
+        if column != 0 or self._show_for_row(row) is None:
+            return
+        if row in self._expanded_rows:
+            self._collapse_row(row)
+        else:
+            self._expand_row(row)
+
+    def _expand_row(self, data_row: int) -> None:
+        show = self._show_for_row(data_row)
+        if show is None:
+            return
+        _shift_expanded_rows(self._expanded_rows, data_row, 1)
+        insert_row = data_row + 1
+        self.insertRow(insert_row)
+
+        loading_label = QLabel("Loading seasons…", self)
+        loading_label.setContentsMargins(8, 8, 8, 8)
+        _set_detail_row_widget(self, insert_row, loading_label)
+
+        self._expanded_rows[data_row] = insert_row
+        expand_item = self.item(data_row, 0)
+        if expand_item is not None:
+            expand_item.setText(_expand_icon(True))
+
+        self.show_expanded.emit(show)
+
+        if show.id in self._detail_threads and self._detail_threads[show.id].isRunning():
+            return
+
+        thread = QThread(self)
+        worker = _TvShowDetailsWorker(self._library_db_service, show.id, self._db_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._on_show_details_loaded)
+        worker.failed.connect(self._on_show_details_failed)
+        worker.succeeded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(lambda show_id=show.id: self._cleanup_detail_thread(show_id))
+        self._detail_threads[show.id] = thread
+        self._detail_workers[show.id] = worker
+        thread.start()
+
+    def _collapse_row(self, data_row: int) -> None:
+        show = self._show_for_row(data_row)
+        if show is None:
+            return
+        detail_row = self._expanded_rows.pop(data_row)
+        self.removeRow(detail_row)
+        _shift_expanded_rows(self._expanded_rows, data_row, -1)
+        expand_item = self.item(data_row, 0)
+        if expand_item is not None:
+            expand_item.setText(_expand_icon(False))
+
+        thread = self._detail_threads.pop(show.id, None)
+        self._detail_workers.pop(show.id, None)
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait()
+
+        self.show_collapsed.emit(show.id)
+
+    def _replace_detail_widget(self, data_row: int, widget: QWidget) -> None:
+        detail_row = self._expanded_rows.get(data_row)
+        if detail_row is None:
+            return
+
+        _set_detail_row_widget(self, detail_row, widget)
+        self._sync_detail_row(data_row)
+
+    def _sync_detail_row(self, data_row: int) -> None:
+        detail_row = self._expanded_rows.get(data_row)
+        if detail_row is None:
+            return
+
+        container = self.cellWidget(detail_row, 0)
+        if container is None:
+            return
+
+        nested_table = container.findChild(QTableWidget)
+        if nested_table is not None:
+            content_height = nested_table.height()
+        else:
+            content_height = container.sizeHint().height()
+
+        total_height = _detail_container_height(content_height)
+        container.setFixedHeight(total_height)
+        self.setRowHeight(detail_row, total_height)
+
+    def _on_show_details_loaded(self, show_id: int, seasons: list[TvSeasonRecord]) -> None:
+        data_row = self._find_row_for_show(show_id)
+        if data_row is None or data_row not in self._expanded_rows:
+            return
+        if seasons:
+            season_table = SeasonTableWidget(
+                seasons,
+                self,
+                on_geometry_changed=lambda row=data_row: self._sync_detail_row(row),
+                header_state=self._season_header_state,
+                episode_header_state=self._episode_header_state,
+                on_season_header_state_changed=self._handle_season_header_changed,
+                on_episode_header_state_changed=self._handle_episode_header_changed,
+            )
+            self._replace_detail_widget(data_row, season_table)
+        else:
+            self._replace_detail_widget(data_row, QLabel("No seasons found.", self))
+
+    def _on_show_details_failed(self, show_id: int, message: str) -> None:
+        data_row = self._find_row_for_show(show_id)
+        if data_row is None or data_row not in self._expanded_rows:
+            return
+        self._replace_detail_widget(data_row, QLabel(message, self))
+
+    def _cleanup_detail_thread(self, show_id: int) -> None:
+        thread = self._detail_threads.pop(show_id, None)
+        self._detail_workers.pop(show_id, None)
+        if thread is not None:
+            thread.wait()
 
 
 class _TvShowLoadWorker(QObject):
@@ -89,119 +630,154 @@ class _TvShowLoadWorker(QObject):
             self.succeeded.emit(shows)
 
 
-class _TvShowDetailsWorker(QObject):
-    succeeded = Signal(int, list)
-    failed = Signal(int, str)
-
-    def __init__(self, library_db_service: LibraryDbService, show_id: int, db_path: Path) -> None:
-        super().__init__()
-        self._library_db_service = library_db_service
-        self._show_id = show_id
-        self._db_path = db_path
-
-    def run(self) -> None:
-        try:
-            seasons = self._library_db_service.get_show_seasons_and_episodes(self._show_id, self._db_path)
-        except LibraryDbError as exc:
-            self.failed.emit(self._show_id, str(exc))
-        except Exception as exc:
-            self.failed.emit(self._show_id, f"Unexpected error: {exc}")
-        else:
-            self.succeeded.emit(self._show_id, seasons)
-
-
 class TvLibraryTreeWidget(QWidget):
-    """Tree grid of TV shows with expandable seasons and episodes."""
+    """TV library view with independently columned tables for shows, seasons, and episodes."""
 
     _SORT_COLUMNS = {
-        0: "name",
-        1: "year",
-        2: "seasons",
+        1: "name",
+        2: "year",
+        3: "seasons",
     }
 
-    def __init__(self, library_db_service: LibraryDbService, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        library_db_service: LibraryDbService,
+        parent: QWidget | None = None,
+        *,
+        layout_settings: UiLayoutSettings | None = None,
+        metadata_service: TmdbMetadataService | None = None,
+    ) -> None:
         super().__init__(parent)
         self._library_db_service = library_db_service
+        self._metadata_service = metadata_service
+        self._layout_settings = layout_settings or UiLayoutSettings()
         self._db_path: Path | None = None
         self._current_library: LibrarySection | None = None
         self._sort_by = "name"
         self._sort_desc = False
         self._show_thread: QThread | None = None
         self._show_worker: _TvShowLoadWorker | None = None
-        self._detail_threads: dict[int, QThread] = {}
-        self._detail_workers: dict[int, _TvShowDetailsWorker] = {}
+        self._show_table: ShowTableWidget | None = None
+        self._metadata_thread: QThread | None = None
+        self._metadata_worker: _ShowMetadataWorker | None = None
+        self._metadata_show_id: int | None = None
 
         self._placeholder = QLabel("Select a TV Shows library to view series.", self)
-        self._tree = QTreeWidget(self)
-        self._tree.setColumnCount(len(_SHOW_HEADERS))
-        self._tree.setHeaderLabels(_SHOW_HEADERS)
-        self._tree.setRootIsDecorated(True)
-        self._tree.setItemsExpandable(True)
-        self._tree.setIndentation(20)
-        self._tree.setAlternatingRowColors(True)
-        self._tree.setSortingEnabled(False)
-        self._tree.itemExpanded.connect(self._on_item_expanded)
-        self._tree.setStyleSheet(_HEADER_STYLESHEET)
-
-        tree_header = self._tree.header()
-        tree_header.setStretchLastSection(False)
-        tree_header.setSectionsMovable(False)
-        tree_header.setDefaultSectionSize(160)
-        tree_header.setMinimumSectionSize(60)
-        for column in range(len(_SHOW_HEADERS)):
-            tree_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-        self._tree.setColumnWidth(0, 420)
-        self._tree.setColumnWidth(1, 90)
-        self._tree.setColumnWidth(2, 110)
-        tree_header.sectionClicked.connect(self._on_header_clicked)
-
+        self._metadata_panel = ShowMetadataPanel(self)
+        self._metadata_panel.hide()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._placeholder)
-        layout.addWidget(self._tree)
-        self._tree.hide()
+        layout.addWidget(self._metadata_panel)
+
+    def set_layout_settings(self, layout_settings: UiLayoutSettings) -> None:
+        self._layout_settings = layout_settings
+
+    def _sync_layout_to_settings(self) -> None:
+        if self._show_table is None:
+            return
+        self._layout_settings.show_table_header_state = self._show_table.show_header_state()
+        self._layout_settings.season_table_header_state = self._show_table.season_header_state()
+        self._layout_settings.episode_table_header_state = self._show_table.episode_header_state()
+
+    def save_layout_state(self) -> None:
+        self._sync_layout_to_settings()
 
     def set_database_path(self, db_path: Path) -> None:
         self._db_path = db_path
 
     def load_library(self, library: LibrarySection | None) -> None:
         self._current_library = library
-        self._clear_detail_workers()
-        self._tree.clear()
+        self._destroy_show_table()
 
         if library is None or not self._is_tv_library(library) or self._db_path is None:
-            self._tree.hide()
             self._placeholder.setText("Select a TV Shows library to view series.")
             self._placeholder.show()
             return
 
         self._placeholder.setText("Loading TV shows…")
         self._placeholder.show()
-        self._tree.hide()
         self._start_show_load()
 
     def _is_tv_library(self, library: LibrarySection) -> bool:
         return library.section_type == PLEX_SECTION_TYPE_SHOW
 
-    def _make_header_item(self, labels: list[str]) -> QTreeWidgetItem:
-        """Create a non-expandable sub-header row for a nested grid section."""
+    def _destroy_show_table(self) -> None:
+        self._stop_metadata_thread()
+        self._metadata_panel.hide()
+        self._metadata_show_id = None
+        if self._show_table is not None:
+            self._show_table.clear_workers()
+            self._show_table.hide()
+            self._show_table.deleteLater()
+            self._show_table = None
 
-        item = QTreeWidgetItem(labels)
-        item.setData(_DATA_COLUMN, ROLE_ITEM_KIND, _TreeItemKind.HEADER.value)
-        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicator)
+    def _ensure_show_table(self) -> ShowTableWidget:
+        if self._db_path is None:
+            raise LibraryDbError("Database path is not configured.")
+        if self._show_table is None:
+            self._show_table = ShowTableWidget(
+                self._library_db_service,
+                self._db_path,
+                self,
+                show_header_state=self._layout_settings.show_table_header_state,
+                season_header_state=self._layout_settings.season_table_header_state,
+                episode_header_state=self._layout_settings.episode_table_header_state,
+                on_layout_changed=self._sync_layout_to_settings,
+            )
+            self._show_table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+            self._show_table.show_expanded.connect(self._on_show_expanded)
+            self._show_table.show_collapsed.connect(self._on_show_collapsed)
+            self.layout().addWidget(self._show_table)
+        return self._show_table
 
-        header_font = QFont(item.font(_DATA_COLUMN))
-        header_font.setBold(True)
-        header_background = QBrush(_HEADER_BACKGROUND)
-        header_foreground = QBrush(_HEADER_FOREGROUND)
-        for column in range(self._tree.columnCount()):
-            item.setFont(column, header_font)
-            item.setBackground(column, header_background)
-            item.setForeground(column, header_foreground)
-            if column < len(labels):
-                item.setText(column, labels[column])
-        return item
+    def _on_show_expanded(self, show: TvShowSummary) -> None:
+        self._metadata_show_id = show.id
+        self._metadata_panel.set_loading()
+        self._metadata_panel.show()
+
+        if self._metadata_service is None:
+            self._metadata_panel.set_error("No metadata service configured.")
+            return
+
+        self._stop_metadata_thread()
+        self._metadata_thread = QThread(self)
+        self._metadata_worker = _ShowMetadataWorker(self._metadata_service, show)
+        self._metadata_worker.moveToThread(self._metadata_thread)
+        self._metadata_thread.started.connect(self._metadata_worker.run)
+        self._metadata_worker.succeeded.connect(self._on_metadata_loaded)
+        self._metadata_worker.failed.connect(self._on_metadata_failed)
+        self._metadata_worker.succeeded.connect(self._metadata_thread.quit)
+        self._metadata_worker.failed.connect(self._metadata_thread.quit)
+        self._metadata_thread.finished.connect(self._cleanup_metadata_thread)
+        self._metadata_thread.start()
+
+    def _on_show_collapsed(self, show_id: int) -> None:
+        if show_id == self._metadata_show_id:
+            self._stop_metadata_thread()
+            self._metadata_panel.hide()
+            self._metadata_show_id = None
+
+    def _on_metadata_loaded(self, show_id: int, metadata: TvShowMetadata, poster_bytes: bytes | None) -> None:
+        if show_id != self._metadata_show_id:
+            return
+        self._metadata_panel.set_metadata(metadata, poster_bytes)
+
+    def _on_metadata_failed(self, show_id: int, message: str) -> None:
+        if show_id != self._metadata_show_id:
+            return
+        self._metadata_panel.set_error(message)
+
+    def _stop_metadata_thread(self) -> None:
+        if self._metadata_thread is not None and self._metadata_thread.isRunning():
+            self._metadata_thread.quit()
+            self._metadata_thread.wait()
+
+    def _cleanup_metadata_thread(self) -> None:
+        if self._metadata_thread is not None:
+            self._metadata_thread.wait()
+        self._metadata_thread = None
+        self._metadata_worker = None
 
     def _start_show_load(self) -> None:
         if self._current_library is None or self._db_path is None:
@@ -232,43 +808,26 @@ class TvLibraryTreeWidget(QWidget):
         self._show_thread = None
         self._show_worker = None
 
-    def _clear_detail_workers(self) -> None:
-        for thread in self._detail_threads.values():
-            if thread.isRunning():
-                thread.quit()
-                thread.wait()
-        self._detail_threads.clear()
-        self._detail_workers.clear()
-
     def _on_shows_loaded(self, shows: list[TvShowSummary]) -> None:
-        self._tree.clear()
-        for show in shows:
-            item = QTreeWidgetItem(
-                [
-                    show.name,
-                    str(show.year) if show.year is not None else "",
-                    str(show.season_count),
-                ]
-            )
-            item.setData(_DATA_COLUMN, ROLE_ITEM_KIND, _TreeItemKind.SHOW.value)
-            item.setData(_DATA_COLUMN, ROLE_SHOW_ID, show.id)
-            item.setData(_DATA_COLUMN, ROLE_DETAILS_LOADED, False)
-            # Lazy-loaded shows have no children yet; force the expand control to appear.
-            item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
-            self._tree.addTopLevelItem(item)
-
-        self._placeholder.hide()
-        self._tree.show()
         if not shows:
+            self._destroy_show_table()
             self._placeholder.setText("No TV shows were found in this library.")
             self._placeholder.show()
+            return
+
+        show_table = self._ensure_show_table()
+        show_table.set_shows(shows)
+        self._placeholder.hide()
+        show_table.show()
 
     def _on_shows_failed(self, message: str) -> None:
-        self._tree.hide()
+        self._destroy_show_table()
         self._placeholder.setText(message)
         self._placeholder.show()
 
     def _on_header_clicked(self, section: int) -> None:
+        if section == 0:
+            return
         sort_key = self._SORT_COLUMNS.get(section)
         if sort_key is None:
             return
@@ -278,100 +837,3 @@ class TvLibraryTreeWidget(QWidget):
             self._sort_by = sort_key
             self._sort_desc = False
         self._start_show_load()
-
-    def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
-        if item.data(_DATA_COLUMN, ROLE_ITEM_KIND) != _TreeItemKind.SHOW.value:
-            return
-        if item.data(_DATA_COLUMN, ROLE_DETAILS_LOADED):
-            return
-        if self._db_path is None:
-            return
-
-        show_id = int(item.data(_DATA_COLUMN, ROLE_SHOW_ID))
-        if show_id in self._detail_threads and self._detail_threads[show_id].isRunning():
-            return
-
-        loading_item = QTreeWidgetItem(["Loading…", "", ""])
-        loading_item.setFlags(loading_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        item.addChild(loading_item)
-
-        thread = QThread(self)
-        worker = _TvShowDetailsWorker(self._library_db_service, show_id, self._db_path)
-        worker.moveToThread(thread)
-
-        thread.started.connect(worker.run)
-        worker.succeeded.connect(self._on_show_details_loaded)
-        worker.failed.connect(self._on_show_details_failed)
-        worker.succeeded.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(lambda show_id=show_id: self._cleanup_detail_thread(show_id))
-
-        self._detail_threads[show_id] = thread
-        self._detail_workers[show_id] = worker
-        thread.start()
-
-    def _cleanup_detail_thread(self, show_id: int) -> None:
-        thread = self._detail_threads.pop(show_id, None)
-        self._detail_workers.pop(show_id, None)
-        if thread is not None:
-            thread.wait()
-
-    def _find_show_item(self, show_id: int) -> QTreeWidgetItem | None:
-        for index in range(self._tree.topLevelItemCount()):
-            item = self._tree.topLevelItem(index)
-            if item is None:
-                continue
-            if item.data(_DATA_COLUMN, ROLE_SHOW_ID) == show_id:
-                return item
-        return None
-
-    def _on_show_details_loaded(self, show_id: int, seasons: list[TvSeasonRecord]) -> None:
-        show_item = self._find_show_item(show_id)
-        if show_item is None:
-            return
-
-        show_item.takeChildren()
-        if seasons:
-            show_item.addChild(self._make_header_item(_SEASON_HEADERS))
-
-        for season in seasons:
-            season_label = (
-                f"Season {season.season_number}"
-                if season.season_number is not None
-                else "Season"
-            )
-            season_item = QTreeWidgetItem([season_label, "", ""])
-            season_item.setData(_DATA_COLUMN, ROLE_ITEM_KIND, _TreeItemKind.SEASON.value)
-            season_item.setFlags(season_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            show_item.addChild(season_item)
-
-            if season.episodes:
-                season_item.addChild(self._make_header_item(_EPISODE_HEADERS))
-                season_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
-            else:
-                season_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicator)
-
-            for episode in season.episodes:
-                episode_number = (
-                    str(episode.episode_number) if episode.episode_number is not None else ""
-                )
-                episode_item = QTreeWidgetItem([episode_number, episode.title, episode.resolution])
-                episode_item.setData(_DATA_COLUMN, ROLE_ITEM_KIND, _TreeItemKind.EPISODE.value)
-                episode_item.setFlags(episode_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-                season_item.addChild(episode_item)
-
-        show_item.setExpanded(True)
-        show_item.setData(_DATA_COLUMN, ROLE_DETAILS_LOADED, True)
-        if not seasons:
-            empty_item = QTreeWidgetItem(["No seasons found", "", ""])
-            empty_item.setFlags(empty_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            show_item.addChild(empty_item)
-
-    def _on_show_details_failed(self, show_id: int, message: str) -> None:
-        show_item = self._find_show_item(show_id)
-        if show_item is None:
-            return
-        show_item.takeChildren()
-        error_item = QTreeWidgetItem([message, "", ""])
-        error_item.setFlags(error_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        show_item.addChild(error_item)

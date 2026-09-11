@@ -101,11 +101,16 @@ class SettingsDialog(QDialog):
         destination_row_widget = QWidget(self)
         destination_row_widget.setLayout(destination_row)
 
+        self._tmdb_api_key_edit = QLineEdit(self)
+        self._tmdb_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._tmdb_api_key_edit.setPlaceholderText("TMDb API key (optional, see README)")
+
         top_form = QFormLayout()
         top_form.addRow("Connection type:", self._type_combo)
 
         bottom_form = QFormLayout()
         bottom_form.addRow("Save downloaded copy to:", destination_row_widget)
+        bottom_form.addRow("TMDb API key:", self._tmdb_api_key_edit)
 
         self._status_label = QLabel("", self)
         self._status_label.setWordWrap(True)
@@ -152,6 +157,7 @@ class SettingsDialog(QDialog):
     def _load_from_settings(self) -> None:
         app_settings = self._settings_service.load()
         self._destination_edit.setText(app_settings.download_destination)
+        self._tmdb_api_key_edit.setText(self._settings_service.load_tmdb_api_key())
 
         connection = app_settings.connection
         if connection is None:
@@ -165,8 +171,13 @@ class SettingsDialog(QDialog):
         form.set_password(self._settings_service.load_password(connection))
 
     def _build_app_settings(self) -> AppSettings:
+        existing = self._settings_service.load()
         connection = self._current_form().to_settings()
-        return AppSettings(connection=connection, download_destination=self._destination_edit.text().strip())
+        return AppSettings(
+            connection=connection,
+            download_destination=self._destination_edit.text().strip(),
+            ui_layout=existing.ui_layout,
+        )
 
     def _persist_settings(self, *, show_status: bool = False) -> bool:
         try:
@@ -189,6 +200,8 @@ class SettingsDialog(QDialog):
                 app_settings.connection,
                 self._current_form().password(),
             )
+        tmdb_key_saved = self._settings_service.save_tmdb_api_key(self._tmdb_api_key_edit.text().strip())
+        credentials_saved = credentials_saved and tmdb_key_saved
 
         if show_status:
             config_file = self._settings_service.config_file

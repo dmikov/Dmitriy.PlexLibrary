@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
 
 from plexlibrary.models.library import LibrarySection
 from plexlibrary.services.library_db_service import LibraryDbError, LibraryDbService
+from plexlibrary.services.metadata_service import TmdbMetadataService
 from plexlibrary.services.settings_service import SettingsService
+from plexlibrary.services.ui_layout_state import restore_window_geometry, save_window_geometry
 from plexlibrary.ui.settings_dialog import SettingsDialog
 from plexlibrary.ui.tv_library_tree import TvLibraryTreeWidget
 
@@ -54,13 +56,18 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._settings_service = settings_service
         self._library_db_service = LibraryDbService(settings_service)
+        self._metadata_service = TmdbMetadataService(settings_service)
         self._thread: QThread | None = None
         self._worker: _LibraryLoadWorker | None = None
         self._db_path: Path | None = None
         self._libraries: list[LibrarySection] = []
 
+        app_settings = self._settings_service.load()
+        self._ui_layout = app_settings.ui_layout
+
         self.setWindowTitle("Plex Library")
-        self.resize(1100, 750)
+        if not restore_window_geometry(self, self._ui_layout.window_geometry):
+            self.resize(1100, 750)
 
         self._canvas = QWidget(self)
         self._status_label = QLabel("Loading libraries…", self._canvas)
@@ -69,7 +76,12 @@ class MainWindow(QMainWindow):
         self._library_combo.setEnabled(False)
         self._library_combo.currentIndexChanged.connect(self._on_library_changed)
 
-        self._tv_tree = TvLibraryTreeWidget(self._library_db_service, self._canvas)
+        self._tv_tree = TvLibraryTreeWidget(
+            self._library_db_service,
+            self._canvas,
+            layout_settings=self._ui_layout,
+            metadata_service=self._metadata_service,
+        )
 
         form = QFormLayout()
         form.addRow("Library:", self._library_combo)
@@ -82,6 +94,40 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._canvas)
         self._build_toolbar()
         self.refresh_libraries()
+
+    def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._save_layout_state()
+        super().closeEvent(event)
+
+    def _save_layout_state(self) -> None:
+        self._ui_layout.window_geometry = save_window_geometry(self)
+        self._tv_tree.save_layout_state()
+
+        selected_library_id: int | None = None
+        current_index = self._library_combo.currentIndex()
+        if 0 <= current_index < len(self._libraries):
+            selected_library_id = self._libraries[current_index].id
+        self._ui_layout.selected_library_id = selected_library_id
+
+        settings = self._settings_service.load()
+        settings.ui_layout = self._ui_layout
+        self._settings_service.save(settings)
+
+    def _restore_selected_library(self) -> None:
+        selected_library_id = self._ui_layout.selected_library_id
+        if selected_library_id is None:
+            self._on_library_changed(self._library_combo.currentIndex())
+            return
+
+        for index, library in enumerate(self._libraries):
+            if library.id == selected_library_id:
+                self._library_combo.blockSignals(True)
+                self._library_combo.setCurrentIndex(index)
+                self._library_combo.blockSignals(False)
+                self._on_library_changed(index)
+                return
+
+        self._on_library_changed(self._library_combo.currentIndex())
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main", self)
@@ -132,6 +178,7 @@ class MainWindow(QMainWindow):
         self._libraries = libraries
         self._db_path = Path(self._settings_service.load().download_destination)
         self._tv_tree.set_database_path(self._db_path)
+        self._tv_tree.set_layout_settings(self._ui_layout)
 
         self._library_combo.blockSignals(True)
         self._library_combo.clear()
@@ -151,7 +198,7 @@ class MainWindow(QMainWindow):
             f"Loaded {len(libraries)} libraries from {self._db_path}. "
             "Using cached copy when it is less than 1 day old."
         )
-        self._on_library_changed(self._library_combo.currentIndex())
+        self._restore_selected_library()
 
     def _on_libraries_failed(self, message: str) -> None:
         self._library_combo.clear()
@@ -171,6 +218,7 @@ class MainWindow(QMainWindow):
             self._tv_tree.load_library(self._libraries[index])
 
     def _open_settings(self) -> None:
+        self._save_layout_state()
         dialog = SettingsDialog(self._settings_service, self)
         dialog.exec()
         self.refresh_libraries()
