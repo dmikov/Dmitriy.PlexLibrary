@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -27,7 +28,8 @@ from plexlibrary.models.tv import (
 )
 from plexlibrary.models.ui_layout import UiLayoutSettings
 from plexlibrary.services.library_db_service import LibraryDbError, LibraryDbService
-from plexlibrary.services.metadata_service import MetadataError, TmdbMetadataService
+from plexlibrary.services.metadata_service import MetadataError
+from plexlibrary.services.show_metadata_provider import ShowMetadataProvider
 from plexlibrary.services.ui_layout_state import (
     bind_header_state_tracking,
     finalize_stretch_column,
@@ -35,8 +37,14 @@ from plexlibrary.services.ui_layout_state import (
 )
 from plexlibrary.ui.show_metadata_panel import ShowMetadataPanel
 
-_SHOW_HEADERS = ["", "Show", "Year", "Seasons", ""]
+_SHOW_HEADERS = ["", "⟳", "Show", "Year", "Seasons", "TMDb Seasons", ""]
+_SHOW_REFRESH_COLUMN = 1
+_SHOW_NAME_COLUMN = 2
+_SHOW_YEAR_COLUMN = 3
+_SHOW_SEASON_COUNT_COLUMN = 4
+_SHOW_TMDB_SEASON_COLUMN = 5
 _SHOW_SPACER_COLUMN = len(_SHOW_HEADERS) - 1
+_SEASON_MISMATCH_COLOR = QColor(255, 213, 153)
 _SEASON_HEADERS = ["", "Season"]
 _EPISODE_HEADERS = ["Episode #", "Title", "Resolution"]
 _TABLE_HORIZONTAL_MARGIN = 20
@@ -114,6 +122,7 @@ def _configure_material_table(
     default_widths: list[int],
     *,
     fixed_expand_column: bool = False,
+    extra_fixed_columns: tuple[int, ...] = (),
     stretch_column: int | None = None,
     stretch_column_min_width: int = _TABLE_HORIZONTAL_MARGIN,
     header_state: str = "",
@@ -144,10 +153,15 @@ def _configure_material_table(
         elif fixed_expand_column and column == 0:
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             table.setColumnWidth(column, _EXPAND_COLUMN_WIDTH)
+        elif column in extra_fixed_columns:
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            table.setColumnWidth(column, _EXPAND_COLUMN_WIDTH)
         else:
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
     for column, width in enumerate(default_widths):
         if fixed_expand_column and column == 0:
+            continue
+        if column in extra_fixed_columns:
             continue
         if stretch_column is not None and column == stretch_column:
             continue
@@ -167,6 +181,13 @@ def _make_item(text: str, *, selectable: bool = True) -> QTableWidgetItem:
     item = QTableWidgetItem(text)
     if not selectable:
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+    return item
+
+
+def _make_refresh_item() -> QTableWidgetItem:
+    item = _make_item("⟳")
+    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+    item.setToolTip("Hard refresh TMDb data for this show")
     return item
 
 
@@ -371,18 +392,29 @@ class _TvShowDetailsWorker(QObject):
             self.succeeded.emit(self._show_id, seasons)
 
 
-class _ShowMetadataWorker(QObject):
+class _ShowMetadataPanelWorker(QObject):
+    """Loads full TMDb metadata (and poster art) for the show detail panel."""
+
     succeeded = Signal(int, object, object)
     failed = Signal(int, str)
 
-    def __init__(self, metadata_service: TmdbMetadataService, show: TvShowSummary) -> None:
+    def __init__(
+        self,
+        provider: ShowMetadataProvider,
+        show: TvShowSummary,
+        *,
+        force_refresh: bool = False,
+    ) -> None:
         super().__init__()
-        self._metadata_service = metadata_service
+        self._provider = provider
         self._show = show
+        self._force_refresh = force_refresh
 
     def run(self) -> None:
         try:
-            metadata = self._metadata_service.fetch_show_metadata(self._show.name, self._show.year)
+            metadata = self._provider.get_full_metadata(
+                self._show.id, self._show.name, self._show.year, force_refresh=self._force_refresh
+            )
         except MetadataError as exc:
             self.failed.emit(self._show.id, str(exc))
             return
@@ -390,14 +422,49 @@ class _ShowMetadataWorker(QObject):
             self.failed.emit(self._show.id, f"Unexpected error: {exc}")
             return
 
-        poster_bytes: bytes | None = None
-        if metadata.poster_url:
-            try:
-                poster_bytes = self._metadata_service.fetch_poster_bytes(metadata.poster_url)
-            except MetadataError:
-                poster_bytes = None
-
+        poster_bytes = self._provider.poster_bytes(metadata, force_refresh=self._force_refresh)
         self.succeeded.emit(self._show.id, metadata, poster_bytes)
+
+
+class _ShowMetadataFetchWorker(QObject):
+    """Fetches (cache-aware) TMDb metadata for the show grid columns.
+
+    Used both for the bulk season-count sweep run after loading a library (`force_refresh=False`,
+    many shows) and for a single row's hard refresh (`force_refresh=True`, one show).
+    """
+
+    show_ready = Signal(int, object)
+    show_failed = Signal(int, str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        provider: ShowMetadataProvider,
+        shows: list[TvShowSummary],
+        *,
+        force_refresh: bool = False,
+    ) -> None:
+        super().__init__()
+        self._provider = provider
+        self._shows = shows
+        self._force_refresh = force_refresh
+
+    def run(self) -> None:
+        for show in self._shows:
+            try:
+                if self._force_refresh:
+                    metadata = self._provider.get_full_metadata(
+                        show.id, show.name, show.year, force_refresh=True
+                    )
+                else:
+                    metadata = self._provider.get_season_summary(show.id, show.name, show.year)
+            except MetadataError as exc:
+                self.show_failed.emit(show.id, str(exc))
+            except Exception as exc:
+                self.show_failed.emit(show.id, f"Unexpected error: {exc}")
+            else:
+                self.show_ready.emit(show.id, metadata)
+        self.finished.emit()
 
 
 class ShowTableWidget(QTableWidget):
@@ -405,6 +472,7 @@ class ShowTableWidget(QTableWidget):
 
     show_expanded = Signal(object)
     show_collapsed = Signal(int)
+    show_metadata_refreshed = Signal(int, object)
 
     def __init__(
         self,
@@ -416,14 +484,20 @@ class ShowTableWidget(QTableWidget):
         season_header_state: str = "",
         episode_header_state: str = "",
         on_layout_changed: Callable[[], None] | None = None,
+        metadata_provider: ShowMetadataProvider | None = None,
     ) -> None:
         super().__init__(parent)
         self._library_db_service = library_db_service
         self._db_path = db_path
+        self._metadata_provider = metadata_provider
         self._shows: list[TvShowSummary] = []
         self._expanded_rows: dict[int, int] = {}
         self._detail_threads: dict[int, QThread] = {}
         self._detail_workers: dict[int, _TvShowDetailsWorker] = {}
+        self._summary_thread: QThread | None = None
+        self._summary_worker: _ShowMetadataFetchWorker | None = None
+        self._refresh_threads: dict[int, QThread] = {}
+        self._refresh_workers: dict[int, _ShowMetadataFetchWorker] = {}
         self._show_header_state = show_header_state
         self._season_header_state = season_header_state
         self._episode_header_state = episode_header_state
@@ -431,8 +505,9 @@ class ShowTableWidget(QTableWidget):
         _configure_material_table(
             self,
             _SHOW_HEADERS,
-            [_EXPAND_COLUMN_WIDTH, 420, 90, 110, _TABLE_HORIZONTAL_MARGIN],
+            [_EXPAND_COLUMN_WIDTH, _EXPAND_COLUMN_WIDTH, 420, 70, 90, 130, _TABLE_HORIZONTAL_MARGIN],
             fixed_expand_column=True,
+            extra_fixed_columns=(_SHOW_REFRESH_COLUMN,),
             stretch_column=_SHOW_SPACER_COLUMN,
             header_state=show_header_state,
             table_stylesheet=_SHOW_TABLE_STYLESHEET,
@@ -494,20 +569,25 @@ class ShowTableWidget(QTableWidget):
         self.clear_workers()
         self._expanded_rows.clear()
         self._shows = shows
+        has_api_key = self._metadata_provider is not None and self._metadata_provider.has_api_key()
         self.setRowCount(len(shows))
         for row, show in enumerate(shows):
             self.setItem(row, 0, _make_item(_expand_icon(False)))
+            self.setItem(row, _SHOW_REFRESH_COLUMN, _make_refresh_item())
             name_item = _make_item(show.name, selectable=False)
             name_item.setData(Qt.ItemDataRole.UserRole, show.id)
-            self.setItem(row, 1, name_item)
+            self.setItem(row, _SHOW_NAME_COLUMN, name_item)
             year = str(show.year) if show.year is not None else ""
-            self.setItem(row, 2, _make_item(year, selectable=False))
-            self.setItem(row, 3, _make_item(str(show.season_count), selectable=False))
+            self.setItem(row, _SHOW_YEAR_COLUMN, _make_item(year, selectable=False))
+            self.setItem(row, _SHOW_SEASON_COUNT_COLUMN, _make_item(str(show.season_count), selectable=False))
+            placeholder = "…" if has_api_key else "—"
+            self.setItem(row, _SHOW_TMDB_SEASON_COLUMN, _make_item(placeholder, selectable=False))
             self.setItem(row, _SHOW_SPACER_COLUMN, _make_blank_spacer_item())
         self._ensure_spacer_column()
+        self._start_season_summary_load()
 
     def _show_for_row(self, row: int) -> TvShowSummary | None:
-        name_item = self.item(row, 1)
+        name_item = self.item(row, _SHOW_NAME_COLUMN)
         if name_item is None:
             return None
         show_id = name_item.data(Qt.ItemDataRole.UserRole)
@@ -526,9 +606,18 @@ class ShowTableWidget(QTableWidget):
         self._detail_threads.clear()
         self._detail_workers.clear()
 
+        self._stop_summary_thread()
+
+        for thread in self._refresh_threads.values():
+            if thread.isRunning():
+                thread.quit()
+                thread.wait()
+        self._refresh_threads.clear()
+        self._refresh_workers.clear()
+
     def _find_row_for_show(self, show_id: int) -> int | None:
         for row in range(self.rowCount()):
-            name_item = self.item(row, 1)
+            name_item = self.item(row, _SHOW_NAME_COLUMN)
             if name_item is None:
                 continue
             if name_item.data(Qt.ItemDataRole.UserRole) == show_id:
@@ -536,12 +625,116 @@ class ShowTableWidget(QTableWidget):
         return None
 
     def _on_cell_clicked(self, row: int, column: int) -> None:
+        if column == _SHOW_REFRESH_COLUMN:
+            self._request_hard_refresh(row)
+            return
         if column != 0 or self._show_for_row(row) is None:
             return
         if row in self._expanded_rows:
             self._collapse_row(row)
         else:
             self._expand_row(row)
+
+    def _start_season_summary_load(self) -> None:
+        self._stop_summary_thread()
+        if self._metadata_provider is None or not self._metadata_provider.has_api_key():
+            return
+        if not self._shows:
+            return
+
+        self._summary_thread = QThread(self)
+        self._summary_worker = _ShowMetadataFetchWorker(self._metadata_provider, list(self._shows))
+        self._summary_worker.moveToThread(self._summary_thread)
+        self._summary_thread.started.connect(self._summary_worker.run)
+        self._summary_worker.show_ready.connect(self._on_show_metadata_ready)
+        self._summary_worker.show_failed.connect(self._on_show_metadata_failed)
+        self._summary_worker.finished.connect(self._summary_thread.quit)
+        self._summary_thread.finished.connect(self._cleanup_summary_thread)
+        self._summary_thread.start()
+
+    def _stop_summary_thread(self) -> None:
+        if self._summary_thread is not None and self._summary_thread.isRunning():
+            self._summary_thread.quit()
+            self._summary_thread.wait()
+        self._summary_thread = None
+        self._summary_worker = None
+
+    def _cleanup_summary_thread(self) -> None:
+        if self._summary_thread is not None:
+            self._summary_thread.wait()
+        self._summary_thread = None
+        self._summary_worker = None
+
+    def _request_hard_refresh(self, row: int) -> None:
+        show = self._show_for_row(row)
+        if show is None or self._metadata_provider is None:
+            return
+        existing_thread = self._refresh_threads.get(show.id)
+        if existing_thread is not None and existing_thread.isRunning():
+            return
+
+        item = self.item(row, _SHOW_TMDB_SEASON_COLUMN)
+        if item is not None:
+            item.setText("…")
+            item.setToolTip("Refreshing from TMDb…")
+
+        thread = QThread(self)
+        worker = _ShowMetadataFetchWorker(self._metadata_provider, [show], force_refresh=True)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.show_ready.connect(self._on_show_metadata_ready)
+        worker.show_failed.connect(self._on_show_metadata_failed)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(lambda show_id=show.id: self._cleanup_refresh_thread(show_id))
+        self._refresh_threads[show.id] = thread
+        self._refresh_workers[show.id] = worker
+        thread.start()
+
+    def _cleanup_refresh_thread(self, show_id: int) -> None:
+        thread = self._refresh_threads.pop(show_id, None)
+        self._refresh_workers.pop(show_id, None)
+        if thread is not None:
+            thread.wait()
+
+    def _on_show_metadata_ready(self, show_id: int, metadata: TvShowMetadata) -> None:
+        self._apply_tmdb_season_metadata(show_id, metadata)
+        self.show_metadata_refreshed.emit(show_id, metadata)
+
+    def _on_show_metadata_failed(self, show_id: int, message: str) -> None:
+        row = self._find_row_for_show(show_id)
+        if row is None:
+            return
+        item = self.item(row, _SHOW_TMDB_SEASON_COLUMN)
+        if item is not None:
+            item.setText("?")
+            item.setToolTip(message)
+
+    def _apply_tmdb_season_metadata(self, show_id: int, metadata: TvShowMetadata) -> None:
+        row = self._find_row_for_show(show_id)
+        if row is None:
+            return
+        show = self._show_for_row(row)
+
+        item = self.item(row, _SHOW_TMDB_SEASON_COLUMN)
+        if item is None:
+            item = _make_item("", selectable=False)
+            self.setItem(row, _SHOW_TMDB_SEASON_COLUMN, item)
+        tmdb_count = metadata.number_of_seasons
+        item.setText(str(tmdb_count) if tmdb_count is not None else "?")
+        season_numbers = metadata.season_numbers
+        item.setToolTip(
+            "TMDb seasons: " + ", ".join(str(number) for number in season_numbers) if season_numbers else ""
+        )
+
+        mismatch = show is not None and tmdb_count is not None and tmdb_count != show.season_count
+        self._set_row_mismatch_tint(row, mismatch)
+
+    def _set_row_mismatch_tint(self, row: int, mismatch: bool) -> None:
+        brush = QBrush(_SEASON_MISMATCH_COLOR) if mismatch else QBrush()
+        for column in range(self.columnCount()):
+            item = self.item(row, column)
+            if item is not None:
+                item.setBackground(brush)
 
     def _expand_row(self, data_row: int) -> None:
         show = self._show_for_row(data_row)
@@ -694,9 +887,9 @@ class TvLibraryTreeWidget(QWidget):
     """TV library view with independently columned tables for shows, seasons, and episodes."""
 
     _SORT_COLUMNS = {
-        1: "name",
-        2: "year",
-        3: "seasons",
+        _SHOW_NAME_COLUMN: "name",
+        _SHOW_YEAR_COLUMN: "year",
+        _SHOW_SEASON_COUNT_COLUMN: "seasons",
     }
 
     def __init__(
@@ -705,11 +898,11 @@ class TvLibraryTreeWidget(QWidget):
         parent: QWidget | None = None,
         *,
         layout_settings: UiLayoutSettings | None = None,
-        metadata_service: TmdbMetadataService | None = None,
+        metadata_provider: ShowMetadataProvider | None = None,
     ) -> None:
         super().__init__(parent)
         self._library_db_service = library_db_service
-        self._metadata_service = metadata_service
+        self._metadata_provider = metadata_provider
         self._layout_settings = layout_settings or UiLayoutSettings()
         self._db_path: Path | None = None
         self._current_library: LibrarySection | None = None
@@ -719,7 +912,7 @@ class TvLibraryTreeWidget(QWidget):
         self._show_worker: _TvShowLoadWorker | None = None
         self._show_table: ShowTableWidget | None = None
         self._metadata_thread: QThread | None = None
-        self._metadata_worker: _ShowMetadataWorker | None = None
+        self._metadata_worker: _ShowMetadataPanelWorker | None = None
         self._metadata_show_id: int | None = None
 
         self._placeholder = QLabel("Select a TV Shows library to view series.", self)
@@ -784,10 +977,12 @@ class TvLibraryTreeWidget(QWidget):
                 season_header_state=self._layout_settings.season_table_header_state,
                 episode_header_state=self._layout_settings.episode_table_header_state,
                 on_layout_changed=self._sync_layout_to_settings,
+                metadata_provider=self._metadata_provider,
             )
             self._show_table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
             self._show_table.show_expanded.connect(self._on_show_expanded)
             self._show_table.show_collapsed.connect(self._on_show_collapsed)
+            self._show_table.show_metadata_refreshed.connect(self._on_show_metadata_refreshed)
             self.layout().addWidget(self._show_table)
         return self._show_table
 
@@ -796,13 +991,13 @@ class TvLibraryTreeWidget(QWidget):
         self._metadata_panel.set_loading()
         self._metadata_panel.show()
 
-        if self._metadata_service is None:
+        if self._metadata_provider is None:
             self._metadata_panel.set_error("No metadata service configured.")
             return
 
         self._stop_metadata_thread()
         self._metadata_thread = QThread(self)
-        self._metadata_worker = _ShowMetadataWorker(self._metadata_service, show)
+        self._metadata_worker = _ShowMetadataPanelWorker(self._metadata_provider, show)
         self._metadata_worker.moveToThread(self._metadata_thread)
         self._metadata_thread.started.connect(self._metadata_worker.run)
         self._metadata_worker.succeeded.connect(self._on_metadata_loaded)
@@ -827,6 +1022,15 @@ class TvLibraryTreeWidget(QWidget):
         if show_id != self._metadata_show_id:
             return
         self._metadata_panel.set_error(message)
+
+    def _on_show_metadata_refreshed(self, show_id: int, metadata: TvShowMetadata) -> None:
+        """Reflect a grid-triggered fetch (bulk load or hard refresh) in the open detail panel."""
+        if show_id != self._metadata_show_id:
+            return
+        poster_bytes = None
+        if self._metadata_provider is not None:
+            poster_bytes = self._metadata_provider.cached_poster_bytes(metadata)
+        self._metadata_panel.set_metadata(metadata, poster_bytes)
 
     def _stop_metadata_thread(self) -> None:
         if self._metadata_thread is not None and self._metadata_thread.isRunning():

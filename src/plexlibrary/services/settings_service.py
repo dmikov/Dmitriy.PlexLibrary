@@ -28,6 +28,10 @@ class SettingsService:
     def config_file(self) -> Path:
         return self._config_file
 
+    @property
+    def config_dir(self) -> Path:
+        return self._config_file.parent
+
     def load(self) -> AppSettings:
         if not self._config_file.exists():
             return AppSettings()

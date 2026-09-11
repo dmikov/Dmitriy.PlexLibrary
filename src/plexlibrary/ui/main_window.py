@@ -20,8 +20,10 @@ from PySide6.QtWidgets import (
 
 from plexlibrary.models.library import LibrarySection
 from plexlibrary.services.library_db_service import LibraryDbError, LibraryDbService
+from plexlibrary.services.metadata_cache_service import MetadataCacheService
 from plexlibrary.services.metadata_service import TmdbMetadataService
 from plexlibrary.services.settings_service import SettingsService
+from plexlibrary.services.show_metadata_provider import ShowMetadataProvider
 from plexlibrary.services.ui_layout_state import restore_window_geometry, save_window_geometry
 from plexlibrary.ui.settings_dialog import SettingsDialog
 from plexlibrary.ui.tv_library_tree import TvLibraryTreeWidget
@@ -57,6 +59,8 @@ class MainWindow(QMainWindow):
         self._settings_service = settings_service
         self._library_db_service = LibraryDbService(settings_service)
         self._metadata_service = TmdbMetadataService(settings_service)
+        self._metadata_cache_service = MetadataCacheService(settings_service.config_dir)
+        self._metadata_provider = ShowMetadataProvider(self._metadata_service, self._metadata_cache_service)
         self._thread: QThread | None = None
         self._worker: _LibraryLoadWorker | None = None
         self._db_path: Path | None = None
@@ -80,7 +84,7 @@ class MainWindow(QMainWindow):
             self._library_db_service,
             self._canvas,
             layout_settings=self._ui_layout,
-            metadata_service=self._metadata_service,
+            metadata_provider=self._metadata_provider,
         )
 
         form = QFormLayout()
