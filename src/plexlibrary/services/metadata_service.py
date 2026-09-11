@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,6 +15,14 @@ from plexlibrary.services.settings_service import SettingsService
 TMDB_API_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w342"
 _REQUEST_TIMEOUT = 15
+# Some Plex libraries store the disambiguation year in the title itself (e.g. "Castle (2009)").
+# TMDb's search treats the query as literal text, so a trailing "(YYYY)" makes it match nothing
+# even though the year is also passed separately via `first_air_date_year` -- strip it before searching.
+_TRAILING_YEAR_PATTERN = re.compile(r"\s*\(\d{4}\)\s*$")
+
+
+def _search_query_name(name: str) -> str:
+    return _TRAILING_YEAR_PATTERN.sub("", name).strip() or name
 
 
 class MetadataError(RuntimeError):
@@ -74,7 +83,7 @@ class TmdbMetadataService:
         return api_key
 
     def _search_show_id(self, api_key: str, name: str, year: int | None) -> int | None:
-        params = {"api_key": api_key, "query": name}
+        params = {"api_key": api_key, "query": _search_query_name(name)}
         if year is not None:
             params["first_air_date_year"] = str(year)
         data = self._get_json("/search/tv", params)
