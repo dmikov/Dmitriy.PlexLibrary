@@ -78,7 +78,7 @@ headers, lazy-loaded on expand via a background thread:
 |-------|---------|
 | Show | ▶, ⟳, Show, Year, Seasons, TMDb Seasons, *(blank stretch spacer)* |
 | Season | ▶, Season, Episodes, TMDb Episodes |
-| Episode | Episode #, Title, Filename, Resolution |
+| Episode | Episode #, Title, Filename, Resolution, Size |
 
 Show/season table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_SHOW_NAME_COLUMN`,
 `_SHOW_YEAR_COLUMN`, `_SHOW_SEASON_COUNT_COLUMN`, `_SHOW_TMDB_SEASON_COLUMN`, `_SHOW_SPACER_COLUMN`,
@@ -155,10 +155,13 @@ Show/season table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_
 
 - `EpisodeTableWidget` is built from `_merge_episode_rows(episodes, tmdb_episodes)`: Plex's episodes
   plus any `TvEpisodeMetadata` from TMDb whose `episode_number` has no matching Plex episode, sorted
-  together by episode number. A missing row gets `filename`/`resolution` left blank (there's no local
-  file to report) and is tinted `_MISSING_TEXT_COLOR` (red) via `setForeground` — don't try to
-  synthesize resolution/filename for these, there's nothing to source them from. The same
+  together by episode number. A missing row gets `filename`/`resolution`/`size` left blank (there's no
+  local file to report) and is tinted `_MISSING_TEXT_COLOR` (red) via `setForeground` — don't try to
+  synthesize any of those for these, there's nothing to source them from. The same
   `_MISSING_TEXT_COLOR` constant is shared with the season grid's missing-season rows above
+- `size` (like `filename`/`resolution`) is a pre-formatted display string sourced from Plex, not a raw
+  number — `library_db_service._format_size()` turns `media_items.size` (bytes) into e.g. `4.05 GB`.
+  Don't add sorting on this column expecting numeric order; it's text
 - `tmdb_episodes` only has real data once the *full* TMDb fetch has run for that show
   (`fetch_show_full`, not the lightweight summary) — until then `SeasonTableWidget` passes `[]` and
   the episode grid just shows Plex's own episodes. `SeasonTableWidget._tmdb_episodes_for(season)`

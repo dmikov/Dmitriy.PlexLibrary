@@ -55,11 +55,12 @@ _MISSING_TEXT_COLOR = QColor(198, 40, 40)
 # Synthetic TvSeasonRecord.id for a season TMDb reports that has no Plex season at all.
 # Plex metadata_items ids are always positive, so a large negative offset can't collide.
 _MISSING_SEASON_ID_OFFSET = 1_000_000_000
-_EPISODE_HEADERS = ["Episode #", "Title", "Filename", "Resolution"]
+_EPISODE_HEADERS = ["Episode #", "Title", "Filename", "Resolution", "Size"]
 _EPISODE_NUMBER_COLUMN = 0
 _EPISODE_TITLE_COLUMN = 1
 _EPISODE_FILENAME_COLUMN = 2
 _EPISODE_RESOLUTION_COLUMN = 3
+_EPISODE_SIZE_COLUMN = 4
 _TABLE_HORIZONTAL_MARGIN = 20
 _HEADER_STYLESHEET = """
 QHeaderView::section {
@@ -221,6 +222,7 @@ class _EpisodeRow(NamedTuple):
     title: str
     filename: str
     resolution: str
+    size: str
     is_missing: bool
 
 
@@ -231,7 +233,9 @@ def _merge_episode_rows(
     """Plex's episodes plus any TMDb reports that have no matching Plex episode number."""
 
     rows = [
-        _EpisodeRow(episode.episode_number, episode.title, episode.filename, episode.resolution, False)
+        _EpisodeRow(
+            episode.episode_number, episode.title, episode.filename, episode.resolution, episode.size, False
+        )
         for episode in episodes
     ]
     if tmdb_episodes:
@@ -239,8 +243,8 @@ def _merge_episode_rows(
         for tmdb_episode in tmdb_episodes:
             if tmdb_episode.episode_number is None or tmdb_episode.episode_number in plex_numbers:
                 continue
-            # Missing from Plex: no local file, so no resolution/filename to show for it.
-            rows.append(_EpisodeRow(tmdb_episode.episode_number, tmdb_episode.name, "", "", True))
+            # Missing from Plex: no local file, so no filename/resolution/size to show for it.
+            rows.append(_EpisodeRow(tmdb_episode.episode_number, tmdb_episode.name, "", "", "", True))
     rows.sort(key=lambda row: row.episode_number if row.episode_number is not None else -1)
     return rows
 
@@ -261,7 +265,7 @@ class EpisodeTableWidget(QTableWidget):
         self._episodes = episodes
         self._tmdb_episodes = tmdb_episodes
         _configure_material_table(
-            self, _EPISODE_HEADERS, [90, 320, 260, 110], header_state=header_state
+            self, _EPISODE_HEADERS, [90, 320, 260, 110, 90], header_state=header_state
         )
         if on_header_state_changed is not None:
             bind_header_state_tracking(self.horizontalHeader(), on_header_state_changed)
@@ -277,6 +281,7 @@ class EpisodeTableWidget(QTableWidget):
             self.setItem(row, _EPISODE_TITLE_COLUMN, _make_item(entry.title, selectable=False))
             self.setItem(row, _EPISODE_FILENAME_COLUMN, _make_item(entry.filename, selectable=False))
             self.setItem(row, _EPISODE_RESOLUTION_COLUMN, _make_item(entry.resolution, selectable=False))
+            self.setItem(row, _EPISODE_SIZE_COLUMN, _make_item(entry.size, selectable=False))
             if entry.is_missing:
                 self._set_row_missing(row)
 

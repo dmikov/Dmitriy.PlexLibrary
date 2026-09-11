@@ -28,6 +28,7 @@ class TvEpisodeRecord(BaseModel):
     title: str = ""
     resolution: str = ""
     filename: str = ""
+    size: str = ""
 
 
 class TvSeasonRecord(BaseModel):

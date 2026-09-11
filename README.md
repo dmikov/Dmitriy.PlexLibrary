@@ -39,9 +39,9 @@ A missing season still shows TMDb's episode count, just nothing in the Plex
 episode-count column — there's nothing there to report.
 
 Expanding a season goes one level further: the episode grid shows each episode's
-filename alongside its title and resolution, and adds a row (in red) for any
+filename, resolution, and file size on disk, and adds a row (in red) for any
 episode TMDb knows about that isn't in your Plex library — a quick way to spot
-gaps. Missing episodes obviously have no filename or resolution to show. A
+gaps. Missing episodes obviously have no filename, resolution, or size to show. A
 missing season's episode grid is red across the board, since none of its
 episodes are in Plex either.
 

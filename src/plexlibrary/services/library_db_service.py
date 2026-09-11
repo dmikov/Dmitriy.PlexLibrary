@@ -181,6 +181,7 @@ class LibraryDbService:
                 episodes.title AS episode_title,
                 media.width AS width,
                 media.height AS height,
+                media.size AS media_size,
                 parts.file AS file_path
             FROM metadata_items seasons
             LEFT JOIN metadata_items episodes
@@ -221,6 +222,7 @@ class LibraryDbService:
                     title=str(row["episode_title"] or ""),
                     resolution=_format_resolution(row["width"], row["height"]),
                     filename=_format_filename(row["file_path"]),
+                    size=_format_size(row["media_size"]),
                 )
             )
 
@@ -248,3 +250,18 @@ def _format_filename(file_path: object) -> str:
     if not file_path:
         return ""
     return str(file_path).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _format_size(size_bytes: object) -> str:
+    """Human-readable file size, e.g. `4.05 GB`."""
+    try:
+        size = float(size_bytes)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if size <= 0:
+        return ""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1024
+    return ""
