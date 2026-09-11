@@ -17,7 +17,6 @@ from plexlibrary.models.connection import (
     ConnectionSettings,
     LocalConnectionSettings,
     PlexDiagnosticsConnectionSettings,
-    SftpConnectionSettings,
     SmbConnectionSettings,
 )
 
@@ -117,53 +116,6 @@ class SmbConnectionForm(ConnectionFormWidget):
             self._database_path_edit.setText(settings.database_path)
             self._domain_edit.setText(settings.domain)
             self._username_edit.setText(settings.username)
-
-    def password(self) -> str:
-        return self._password_edit.text()
-
-    def set_password(self, password: str) -> None:
-        self._password_edit.setText(password)
-
-
-class SftpConnectionForm(ConnectionFormWidget):
-    """Fields for a database reachable over SFTP/SSH."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-
-        self._host_edit = QLineEdit(self)
-        self._port_spin = QSpinBox(self)
-        self._port_spin.setRange(1, 65535)
-        self._port_spin.setValue(22)
-        self._username_edit = QLineEdit(self)
-        self._password_edit = QLineEdit(self)
-        self._password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._remote_path_edit = QLineEdit(self)
-        self._remote_path_edit.setPlaceholderText(
-            "/var/lib/plexmediaserver/.../Plug-in Support/Databases/com.plexapp.plugins.library.db"
-        )
-
-        layout = QFormLayout(self)
-        layout.addRow("Host:", self._host_edit)
-        layout.addRow("Port:", self._port_spin)
-        layout.addRow("Username:", self._username_edit)
-        layout.addRow("Password:", self._password_edit)
-        layout.addRow("Remote database path:", self._remote_path_edit)
-
-    def to_settings(self) -> ConnectionSettings:
-        return SftpConnectionSettings(
-            host=self._host_edit.text().strip(),
-            port=self._port_spin.value(),
-            username=self._username_edit.text().strip(),
-            remote_database_path=self._remote_path_edit.text().strip(),
-        )
-
-    def set_settings(self, settings: ConnectionSettings) -> None:
-        if isinstance(settings, SftpConnectionSettings):
-            self._host_edit.setText(settings.host)
-            self._port_spin.setValue(settings.port)
-            self._username_edit.setText(settings.username)
-            self._remote_path_edit.setText(settings.remote_database_path)
 
     def password(self) -> str:
         return self._password_edit.text()

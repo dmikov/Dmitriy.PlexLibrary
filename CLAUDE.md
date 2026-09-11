@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PlexLibrary is a PySide6 desktop app for browsing a Plex TV library from a local copy of the
 `com.plexapp.plugins.library.db` SQLite database. The database can be reached via local path, SMB,
-SFTP, or the Plex diagnostics API. Optional TMDb metadata (overview, rating, genres, poster, and
+or the Plex diagnostics API. Optional TMDb metadata (overview, rating, genres, poster, and
 per-season/episode data) is shown when a show is expanded, and a TMDb-vs-Plex season count check
 runs for every row in the show grid. TMDb results are cached to disk (`services/metadata_cache_service.py`)
 and reused across runs unless a hard refresh is requested.
@@ -31,7 +31,7 @@ There is no test suite in this repo currently.
 | TMDb metadata cache | `~/.config/PlexLibrary/tmdb_cache.json` — keyed by Plex show id, holds show/season/episode data |
 | TMDb poster cache | `~/.config/PlexLibrary/tmdb_posters/<tmdb_id>.img` |
 
-Connection types (`models/connection.py`): `local`, `smb`, `sftp`, `plex_diagnostics`.
+Connection types (`models/connection.py`): `local`, `smb`, `plex_diagnostics`.
 
 - Plex diagnostics endpoint: `GET /diagnostics/databases/?X-Plex-Token=...`
 - ZIP member name for DB extract: `databaseBackup.db*` (not `com.plexapp.plugins.library.db`)
@@ -51,7 +51,7 @@ Key files:
 | File | Role |
 |------|------|
 | `services/settings_service.py` | JSON settings load/save + keyring credential/API-key storage |
-| `services/database_downloader.py` | Fetches the DB file over local/SMB/SFTP/diagnostics transports |
+| `services/database_downloader.py` | Fetches the DB file over local/SMB/diagnostics transports |
 | `services/library_db_service.py` | Read-only SQLite queries against the downloaded DB, freshness check |
 | `services/metadata_service.py` | Raw TMDb HTTP calls via stdlib `urllib` (no HTTP dependency): `fetch_show_summary` (show + season list), `fetch_show_full` (+ per-season episode lists), `fetch_poster_bytes` |
 | `services/metadata_cache_service.py` | Reads/writes the on-disk TMDb cache (`tmdb_cache.json` + poster files), keyed by Plex show id |

@@ -16,7 +16,6 @@ class ConnectionType(StrEnum):
 
     LOCAL = "local"
     SMB = "smb"
-    SFTP = "sftp"
     PLEX_DIAGNOSTICS = "plex_diagnostics"
 
 
@@ -49,23 +48,6 @@ class SmbConnectionSettings(BaseModel):
         return f"smb:{self.username}@{self.server}:{self.port}/{self.share}"
 
 
-class SftpConnectionSettings(BaseModel):
-    """A database reachable over SFTP/SSH."""
-
-    type: Literal[ConnectionType.SFTP] = ConnectionType.SFTP
-    host: str = ""
-    port: int = 22
-    username: str = ""
-    remote_database_path: str = Field(
-        default="",
-        description="Absolute path to the database file on the remote host.",
-    )
-
-    @property
-    def credential_key(self) -> str:
-        return f"sftp:{self.username}@{self.host}:{self.port}"
-
-
 class PlexDiagnosticsConnectionSettings(BaseModel):
     """A database downloaded from the Plex Media Server diagnostics API."""
 
@@ -89,7 +71,6 @@ ConnectionSettings = Annotated[
     Union[
         LocalConnectionSettings,
         SmbConnectionSettings,
-        SftpConnectionSettings,
         PlexDiagnosticsConnectionSettings,
     ],
     Field(discriminator="type"),

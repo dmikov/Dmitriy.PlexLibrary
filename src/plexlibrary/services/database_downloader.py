@@ -11,14 +11,12 @@ import zipfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-import paramiko
 import smbclient
 
 from plexlibrary.models.connection import (
     ConnectionSettings,
     LocalConnectionSettings,
     PlexDiagnosticsConnectionSettings,
-    SftpConnectionSettings,
     SmbConnectionSettings,
 )
 
@@ -88,36 +86,6 @@ class SmbDatabaseDownloader(DatabaseDownloader):
             raise DatabaseDownloadError(f"Failed to download {remote_path}: {exc}") from exc
         finally:
             smbclient.delete_session(settings.server, port=settings.port)
-        return destination
-
-
-class SftpDatabaseDownloader(DatabaseDownloader):
-    """Downloads a database file over SFTP/SSH."""
-
-    def __init__(self, settings: SftpConnectionSettings, password: str) -> None:
-        self._settings = settings
-        self._password = password
-
-    def download(self, destination: Path) -> Path:
-        settings = self._settings
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            client.connect(
-                hostname=settings.host,
-                port=settings.port,
-                username=settings.username or None,
-                password=self._password or None,
-            )
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with client.open_sftp() as sftp:
-                sftp.get(settings.remote_database_path, str(destination))
-        except Exception as exc:
-            raise DatabaseDownloadError(
-                f"Failed to download {settings.remote_database_path} from {settings.host}: {exc}"
-            ) from exc
-        finally:
-            client.close()
         return destination
 
 
@@ -204,8 +172,6 @@ def create_downloader(settings: ConnectionSettings, password: str) -> DatabaseDo
         return LocalDatabaseDownloader(settings)
     if isinstance(settings, SmbConnectionSettings):
         return SmbDatabaseDownloader(settings, password)
-    if isinstance(settings, SftpConnectionSettings):
-        return SftpDatabaseDownloader(settings, password)
     if isinstance(settings, PlexDiagnosticsConnectionSettings):
         return PlexDiagnosticsDatabaseDownloader(settings, password)
     raise ValueError(f"Unsupported connection settings: {settings!r}")

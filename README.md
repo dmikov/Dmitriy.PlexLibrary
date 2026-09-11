@@ -2,7 +2,7 @@
 
 A desktop app (PySide6) for browsing your Plex TV library from a local copy of the
 Plex `com.plexapp.plugins.library.db` database — reachable over a local path, SMB,
-SFTP, or the Plex diagnostics API — with optional TMDb metadata (overview, rating,
+or the Plex diagnostics API — with optional TMDb metadata (overview, rating,
 genres, poster) shown for the show you're currently inspecting.
 
 ## Setup
@@ -15,7 +15,7 @@ uv run plexlibrary
 ## Configuring your Plex database connection
 
 Open **Settings** (the gear icon in the toolbar) and choose how to reach your Plex
-database file: a local/mounted path, an SMB share, SFTP, or the Plex diagnostics API.
+database file: a local/mounted path, an SMB share, or the Plex diagnostics API.
 Credentials are stored in your OS keyring, never in the plain-text settings file.
 
 ## TV show metadata (TMDb)
@@ -72,7 +72,7 @@ viewed or refreshed.
 5. In PlexLibrary, open **Settings** and paste it into the **TMDb API key** field,
    then click **Save**.
 
-The key is stored in your OS keyring, the same way SMB/SFTP/Plex credentials are —
+The key is stored in your OS keyring, the same way SMB/Plex credentials are —
 it is never written to the plain-text settings file.
 
 TMDb's free tier has no published hard daily cap for this kind of personal use and

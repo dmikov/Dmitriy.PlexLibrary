@@ -28,14 +28,12 @@ from plexlibrary.ui.connection_forms import (
     ConnectionFormWidget,
     LocalConnectionForm,
     PlexDiagnosticsConnectionForm,
-    SftpConnectionForm,
     SmbConnectionForm,
 )
 
 _TYPE_LABELS: dict[ConnectionType, str] = {
     ConnectionType.LOCAL: "Local / mounted path",
     ConnectionType.SMB: "SMB network share",
-    ConnectionType.SFTP: "SFTP / SSH",
     ConnectionType.PLEX_DIAGNOSTICS: "Plex diagnostics (HTTP)",
 }
 
@@ -83,13 +81,11 @@ class SettingsDialog(QDialog):
 
         self._local_form = LocalConnectionForm(self)
         self._smb_form = SmbConnectionForm(self)
-        self._sftp_form = SftpConnectionForm(self)
         self._plex_diagnostics_form = PlexDiagnosticsConnectionForm(self)
 
         self._stack = QStackedWidget(self)
         self._stack.addWidget(self._local_form)
         self._stack.addWidget(self._smb_form)
-        self._stack.addWidget(self._sftp_form)
         self._stack.addWidget(self._plex_diagnostics_form)
 
         self._destination_edit = QLineEdit(self)
@@ -137,7 +133,6 @@ class SettingsDialog(QDialog):
         return {
             ConnectionType.LOCAL: self._local_form,
             ConnectionType.SMB: self._smb_form,
-            ConnectionType.SFTP: self._sftp_form,
             ConnectionType.PLEX_DIAGNOSTICS: self._plex_diagnostics_form,
         }[connection_type]
 
