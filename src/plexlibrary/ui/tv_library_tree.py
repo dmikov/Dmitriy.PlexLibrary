@@ -502,6 +502,7 @@ class ShowTableWidget(QTableWidget):
         self._season_header_state = season_header_state
         self._episode_header_state = episode_header_state
         self._on_layout_changed = on_layout_changed
+        self._syncing_spacer_column = False
         _configure_material_table(
             self,
             _SHOW_HEADERS,
@@ -533,11 +534,20 @@ class ShowTableWidget(QTableWidget):
         self._ensure_spacer_column()
 
     def _ensure_spacer_column(self) -> None:
-        finalize_stretch_column(
-            self.horizontalHeader(),
-            _SHOW_SPACER_COLUMN,
-            _TABLE_HORIZONTAL_MARGIN,
-        )
+        # resizeSection()/moveSection() below can synchronously re-emit sectionResized/sectionMoved,
+        # which are wired back into this same method (via _keep_spacer_column_last and header-state
+        # tracking); guard against that re-entrancy so a stubborn header can't cascade indefinitely.
+        if self._syncing_spacer_column:
+            return
+        self._syncing_spacer_column = True
+        try:
+            finalize_stretch_column(
+                self.horizontalHeader(),
+                _SHOW_SPACER_COLUMN,
+                _TABLE_HORIZONTAL_MARGIN,
+            )
+        finally:
+            self._syncing_spacer_column = False
 
     def show_header_state(self) -> str:
         return self._show_header_state

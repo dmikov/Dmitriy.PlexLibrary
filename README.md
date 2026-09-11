@@ -23,7 +23,34 @@ Credentials are stored in your OS keyring, never in the plain-text settings file
 When you expand a show in the library grid, PlexLibrary looks it up on
 [TMDb](https://www.themoviedb.org/) (The Movie Database) and shows its overview,
 rating, genres, network, and poster. This is optional — without an API key the
-grid still works, you just won't see the metadata panel.
+grid still works, you just won't see the metadata panel or the TMDb columns below.
+
+### Season count check
+
+With an API key configured, the show grid also gets a **TMDb Seasons** column next
+to Plex's own **Seasons** column. If the two numbers disagree, the whole row is
+tinted to flag the mismatch — a quick way to spot shows where your Plex library is
+missing (or has extra) seasons compared to TMDb. Hovering the TMDb Seasons cell
+shows the actual season sequence TMDb reports (e.g. specials as season `0`).
+
+Click the **⟳** icon at the start of a row to force a hard refresh of that show's
+TMDb data, bypassing the cache described below.
+
+### Local metadata caching
+
+TMDb data (show details, season/episode lists, and poster art) is cached locally
+after the first lookup and reused on later runs instead of being re-fetched — this
+keeps startup fast and avoids hammering TMDb's API for a library that rarely
+changes. The cache is only bypassed when you explicitly click a row's **⟳**
+refresh icon.
+
+The cache lives alongside `settings.json`, at:
+
+- `~/.config/PlexLibrary/tmdb_cache.json` — show/season/episode metadata
+- `~/.config/PlexLibrary/tmdb_posters/` — poster images
+
+Delete either to reset the cache; it will be rebuilt automatically as shows are
+viewed or refreshed.
 
 ### Getting a free TMDb API key
 
