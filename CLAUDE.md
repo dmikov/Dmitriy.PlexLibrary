@@ -78,7 +78,7 @@ headers, lazy-loaded on expand via a background thread:
 |-------|---------|
 | Show | ▶, ⟳, Show, Year, Seasons, TMDb Seasons, *(blank stretch spacer)* |
 | Season | ▶, Season, Episodes, TMDb Episodes |
-| Episode | Episode #, Title, Resolution |
+| Episode | Episode #, Title, Filename, Resolution |
 
 Show/season table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_SHOW_NAME_COLUMN`,
 `_SHOW_YEAR_COLUMN`, `_SHOW_SEASON_COUNT_COLUMN`, `_SHOW_TMDB_SEASON_COLUMN`, `_SHOW_SPACER_COLUMN`,
@@ -102,9 +102,11 @@ Show/season table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_
 - On `set_shows()`, a background `_ShowMetadataFetchWorker` (via `ShowMetadataProvider`) fetches
   each show's TMDb season summary (cache-first) and fills the **TMDb Seasons** column as results
   stream in; skipped entirely when no TMDb API key is configured (`has_api_key()`)
-- A row is tinted `_SEASON_MISMATCH_COLOR` (all cells, via `_set_row_mismatch_tint`) when
-  `metadata.number_of_seasons != show.season_count`; reset with a bare `QBrush()` so alternating
-  row colors resume — don't compare anything other than these two displayed numbers
+- A row's font is tinted `_MISMATCH_TEXT_COLOR` (all cells, via `_set_row_season_mismatch`, using
+  `setForeground`) when `metadata.number_of_seasons != show.season_count`; reset with a bare
+  `QBrush()` so the normal/alternating text color resumes — don't compare anything other than these
+  two displayed numbers, and don't switch this back to `setBackground` (background tinting was
+  deliberately replaced with font-color tinting)
 - Clicking the **⟳** cell (`_SHOW_REFRESH_COLUMN`) calls `_request_hard_refresh`, which re-runs the
   same worker with `force_refresh=True` — this bypasses the cache for that one show only and also
   emits `show_metadata_refreshed`, which `TvLibraryTreeWidget` uses to live-update the detail panel
@@ -131,11 +133,32 @@ Show/season table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_
 - If TMDb data arrives *after* a season table is already open, `update_show_metadata()` locates the
   live `SeasonTableWidget` via `_season_table_for_show()` (`cellWidget` lookup on the expanded detail
   row) and calls `season_table.update_tmdb_seasons(...)` to refresh it in place
-- Mismatch here is **font color**, not background — `_set_row_episode_mismatch()` uses
-  `item.setForeground(QBrush(_EPISODE_MISMATCH_TEXT_COLOR))` (orange) across the season row's static
-  columns, reset via a bare `QBrush()`. This is a different visual treatment from the show grid's
-  row-background tint (`_set_row_mismatch_tint` / `_SEASON_MISMATCH_COLOR`) — don't conflate the two
-  when editing either
+- Mismatch here is **font color**, same as the show grid — `_set_row_episode_mismatch()` uses
+  `item.setForeground(QBrush(_MISMATCH_TEXT_COLOR))` (orange) across the season row's static
+  columns, reset via a bare `QBrush()`. The show grid's `_set_row_season_mismatch()` shares the same
+  `_MISMATCH_TEXT_COLOR` constant — keep both in sync if the color ever changes
+
+### Missing-episode rows on the episode grid (`ui/tv_library_tree.py`)
+
+- `EpisodeTableWidget` is built from `_merge_episode_rows(episodes, tmdb_episodes)`: Plex's episodes
+  plus any `TvEpisodeMetadata` from TMDb whose `episode_number` has no matching Plex episode, sorted
+  together by episode number. A missing row gets `filename`/`resolution` left blank (there's no local
+  file to report) and is tinted `_MISSING_EPISODE_TEXT_COLOR` (red) via `setForeground` — don't try to
+  synthesize resolution/filename for these, there's nothing to source them from
+- `tmdb_episodes` only has real data once the *full* TMDb fetch has run for that show
+  (`fetch_show_full`, not the lightweight summary) — until then `SeasonTableWidget` passes `[]` and
+  the episode grid just shows Plex's own episodes. `SeasonTableWidget._tmdb_episodes_for(season)`
+  centralizes that lookup (`None` seasons dict or no season-number match → `[]`)
+- A season with **zero** Plex episodes is still expandable if TMDb reports episodes for it (an
+  entirely-missing season) — `_populate()`'s and `_on_cell_clicked()`'s "does this row have anything
+  to expand" checks both use `season.episodes or self._tmdb_episodes_for(season)`. Known gap: if a
+  season starts with no Plex episodes and no TMDb data yet, it renders non-expandable at first; it
+  won't retroactively become expandable when TMDb data arrives later without a re-expand of the show
+  (only the counts/rows of an *already-open* episode table refresh live, per below)
+- Live refresh follows the same chain as the season mismatch above: `SeasonTableWidget.update_tmdb_seasons()`
+  now also finds any open `EpisodeTableWidget` per season (`_episode_table_for_season()`, a
+  `cellWidget` lookup like `_season_table_for_show()`) and calls `update_tmdb_episodes()` on it in
+  place, then calls `self.sync_geometry()` once to resync row heights up the chain
 
 ### UI layout persistence
 

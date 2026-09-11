@@ -27,6 +27,7 @@ class TvEpisodeRecord(BaseModel):
     episode_number: int | None = None
     title: str = ""
     resolution: str = ""
+    filename: str = ""
 
 
 class TvSeasonRecord(BaseModel):

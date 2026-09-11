@@ -180,13 +180,16 @@ class LibraryDbService:
                 episodes.[index] AS episode_number,
                 episodes.title AS episode_title,
                 media.width AS width,
-                media.height AS height
+                media.height AS height,
+                parts.file AS file_path
             FROM metadata_items seasons
             LEFT JOIN metadata_items episodes
               ON episodes.parent_id = seasons.id
              AND episodes.metadata_type = {PLEX_METADATA_TYPE_EPISODE}
             LEFT JOIN media_items media
               ON media.metadata_item_id = episodes.id
+            LEFT JOIN media_parts parts
+              ON parts.media_item_id = media.id
             WHERE seasons.parent_id = ?
               AND seasons.metadata_type = {PLEX_METADATA_TYPE_SEASON}
             ORDER BY seasons.[index] ASC, episodes.[index] ASC
@@ -217,6 +220,7 @@ class LibraryDbService:
                     episode_number=int(row["episode_number"]) if row["episode_number"] is not None else None,
                     title=str(row["episode_title"] or ""),
                     resolution=_format_resolution(row["width"], row["height"]),
+                    filename=_format_filename(row["file_path"]),
                 )
             )
 
@@ -237,3 +241,10 @@ def _format_resolution(width: object, height: object) -> str:
         return f"{int(width)}x{int(height)}"
     except (TypeError, ValueError):
         return ""
+
+
+def _format_filename(file_path: object) -> str:
+    """Basename of a Plex media part's file path, whether it uses `/` or `\\` separators."""
+    if not file_path:
+        return ""
+    return str(file_path).replace("\\", "/").rsplit("/", 1)[-1]
