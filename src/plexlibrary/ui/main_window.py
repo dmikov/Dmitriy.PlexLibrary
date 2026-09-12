@@ -35,13 +35,14 @@ class _LibraryLoadWorker(QObject):
     succeeded = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, library_db_service: LibraryDbService) -> None:
+    def __init__(self, library_db_service: LibraryDbService, *, force: bool = False) -> None:
         super().__init__()
         self._library_db_service = library_db_service
+        self._force = force
 
     def run(self) -> None:
         try:
-            db_path = self._library_db_service.ensure_local_database()
+            db_path = self._library_db_service.ensure_local_database(force=self._force)
             libraries = self._library_db_service.list_libraries(db_path)
         except LibraryDbError as exc:
             self.failed.emit(str(exc))
@@ -139,6 +140,11 @@ class MainWindow(QMainWindow):
         toolbar.setFloatable(False)
         self.addToolBar(toolbar)
 
+        self._refresh_action = QAction("⟳", self)
+        self._refresh_action.setToolTip("Force a fresh library download")
+        self._refresh_action.triggered.connect(self._force_refresh_library)
+        toolbar.addAction(self._refresh_action)
+
         spacer = QWidget(self)
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -148,19 +154,23 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self._open_settings)
         toolbar.addAction(settings_action)
 
-    def refresh_libraries(self) -> None:
+    def _force_refresh_library(self) -> None:
+        self.refresh_libraries(force=True)
+
+    def refresh_libraries(self, *, force: bool = False) -> None:
         if self._thread is not None and self._thread.isRunning():
             return
 
+        self._refresh_action.setEnabled(False)
         self._library_combo.blockSignals(True)
         self._library_combo.setEnabled(False)
         self._library_combo.clear()
         self._library_combo.blockSignals(False)
         self._tv_tree.load_library(None)
-        self._status_label.setText("Loading libraries…")
+        self._status_label.setText("Downloading the latest library…" if force else "Loading libraries…")
 
         self._thread = QThread(self)
-        self._worker = _LibraryLoadWorker(self._library_db_service)
+        self._worker = _LibraryLoadWorker(self._library_db_service, force=force)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
@@ -177,6 +187,7 @@ class MainWindow(QMainWindow):
             self._thread.wait()
         self._thread = None
         self._worker = None
+        self._refresh_action.setEnabled(True)
 
     def _on_libraries_loaded(self, libraries: list[LibrarySection]) -> None:
         self._libraries = libraries

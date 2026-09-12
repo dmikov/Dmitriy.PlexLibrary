@@ -41,15 +41,15 @@ class LibraryDbService:
     def max_age(self) -> timedelta:
         return self._max_age
 
-    def ensure_local_database(self) -> Path:
-        """Return a local database path, downloading again when missing or older than `max_age`."""
+    def ensure_local_database(self, *, force: bool = False) -> Path:
+        """Return a local database path, downloading again when missing, stale, or `force` is set."""
 
         app_settings = self._settings_service.load()
         if app_settings.connection is None:
             raise LibraryDbError("Configure a connection in Settings before loading libraries.")
 
         destination = Path(app_settings.download_destination)
-        if destination.is_file() and self._is_fresh(destination):
+        if not force and destination.is_file() and self._is_fresh(destination):
             return destination
 
         password = self._settings_service.load_password(app_settings.connection)
