@@ -20,6 +20,8 @@ from plexlibrary.services.settings_service import SettingsService
 
 DEFAULT_MAX_AGE = timedelta(days=1)
 
+_DOWNLOADED_DB_FILE_NAME = "downloaded_library.db"
+
 
 class LibraryDbError(RuntimeError):
     """Raised when the local Plex database could not be prepared or read."""
@@ -41,6 +43,11 @@ class LibraryDbService:
     def max_age(self) -> timedelta:
         return self._max_age
 
+    @property
+    def database_path(self) -> Path:
+        """Where the downloaded database is stored, alongside settings and the TMDb cache."""
+        return self._settings_service.config_dir / _DOWNLOADED_DB_FILE_NAME
+
     def ensure_local_database(self, *, force: bool = False) -> Path:
         """Return a local database path, downloading again when missing, stale, or `force` is set."""
 
@@ -48,7 +55,7 @@ class LibraryDbService:
         if app_settings.connection is None:
             raise LibraryDbError("Configure a connection in Settings before loading libraries.")
 
-        destination = Path(app_settings.download_destination)
+        destination = self.database_path
         if not force and destination.is_file() and self._is_fresh(destination):
             return destination
 

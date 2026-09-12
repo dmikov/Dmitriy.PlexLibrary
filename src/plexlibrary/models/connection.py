@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from pathlib import Path
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field
@@ -82,7 +81,4 @@ class AppSettings(BaseModel):
     """Everything persisted between runs of the application."""
 
     connection: ConnectionSettings | None = None
-    download_destination: str = Field(
-        default_factory=lambda: str(Path.home() / "PlexLibrary" / "downloaded" / "com.plexapp.plugins.library.db")
-    )
     ui_layout: UiLayoutSettings = Field(default_factory=UiLayoutSettings)

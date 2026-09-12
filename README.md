@@ -58,7 +58,7 @@ refresh icon.
 
 The cache lives alongside `settings.json`, at:
 
-- `~/.config/PlexLibrary/tmdb_cache.json` — show/season/episode metadata
+- `~/.config/PlexLibrary/tmdb_cache.sqlite3` — show/season/episode metadata
 - `~/.config/PlexLibrary/tmdb_posters/` — poster images
 
 Delete either to reset the cache; it will be rebuilt automatically as shows are

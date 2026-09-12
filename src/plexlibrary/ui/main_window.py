@@ -191,7 +191,7 @@ class MainWindow(QMainWindow):
 
     def _on_libraries_loaded(self, libraries: list[LibrarySection]) -> None:
         self._libraries = libraries
-        self._db_path = Path(self._settings_service.load().download_destination)
+        self._db_path = self._library_db_service.database_path
         self._tv_tree.set_database_path(self._db_path)
         self._tv_tree.set_layout_settings(self._ui_layout)
 

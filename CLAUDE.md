@@ -27,8 +27,8 @@ There is no test suite in this repo currently.
 |------|----------|
 | Settings file | `~/.config/PlexLibrary/settings.json` |
 | Passwords / TMDb API key | OS keyring (`PlexLibrary` service) — never written to the plain-text settings file |
-| Downloaded DB cache | Path from `download_destination` in settings; reused when < 24h old |
-| TMDb metadata cache | `~/.config/PlexLibrary/tmdb_cache.json` — keyed by Plex show id, holds show/season/episode data |
+| Downloaded DB cache | `~/.config/PlexLibrary/downloaded_library.db` — reused when < 24h old |
+| TMDb metadata cache | `~/.config/PlexLibrary/tmdb_cache.sqlite3` — one row per Plex show id, holding show/season/episode data as JSON; a legacy `tmdb_cache.json` is imported once and renamed to `.json.migrated` |
 | TMDb poster cache | `~/.config/PlexLibrary/tmdb_posters/<tmdb_id>.img` |
 
 Connection types (`models/connection.py`): `local`, `smb`, `plex_diagnostics`.
@@ -54,7 +54,7 @@ Key files:
 | `services/database_downloader.py` | Fetches the DB file over local/SMB/diagnostics transports |
 | `services/library_db_service.py` | Read-only SQLite queries against the downloaded DB, freshness check |
 | `services/metadata_service.py` | Raw TMDb HTTP calls via stdlib `urllib` (no HTTP dependency): `fetch_show_summary` (show + season list), `fetch_show_full` (+ per-season episode lists), `fetch_poster_bytes` |
-| `services/metadata_cache_service.py` | Reads/writes the on-disk TMDb cache (`tmdb_cache.json` + poster files), keyed by Plex show id |
+| `services/metadata_cache_service.py` | Reads/writes the on-disk TMDb cache (`tmdb_cache.sqlite3` + poster files), keyed by Plex show id |
 | `services/show_metadata_provider.py` | Cache-aware facade over the two services above — "use saved data unless refresh requested, else fetch and save"; this is what the UI calls, never `TmdbMetadataService` directly |
 | `services/ui_layout_state.py` | Qt geometry/header base64 save-restore helpers |
 | `ui/main_window.py` | Library combo, hosts the TV tree, saves layout on close |

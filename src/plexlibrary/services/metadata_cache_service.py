@@ -3,36 +3,64 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from plexlibrary.models.metadata import CachedShowMetadata, TvShowMetadata
 
-from plexlibrary.models.metadata import CachedShowMetadata
-
-_CACHE_FILE_NAME = "tmdb_cache.json"
+_DB_FILE_NAME = "tmdb_cache.sqlite3"
+_LEGACY_CACHE_FILE_NAME = "tmdb_cache.json"
 _POSTER_DIR_NAME = "tmdb_posters"
-
-
-class _CacheFile(BaseModel):
-    shows: dict[str, CachedShowMetadata] = Field(default_factory=dict)
 
 
 class MetadataCacheService:
     """Reads/writes the on-disk TMDb metadata cache, keyed by Plex show id."""
 
     def __init__(self, config_dir: Path) -> None:
-        self._cache_file = config_dir / _CACHE_FILE_NAME
+        self._db_file = config_dir / _DB_FILE_NAME
+        self._legacy_cache_file = config_dir / _LEGACY_CACHE_FILE_NAME
         self._poster_dir = config_dir / _POSTER_DIR_NAME
+        self._ensure_schema()
+        self._migrate_legacy_cache()
 
     def get(self, plex_show_id: int) -> CachedShowMetadata | None:
-        return self._load().shows.get(str(plex_show_id))
+        connection = self._connect()
+        with connection:
+            row = connection.execute(
+                "SELECT metadata_json, fetched_at, seasons_detail_fetched FROM shows WHERE plex_show_id = ?",
+                (plex_show_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        metadata_json, fetched_at, seasons_detail_fetched = row
+        return CachedShowMetadata(
+            plex_show_id=plex_show_id,
+            metadata=TvShowMetadata.model_validate_json(metadata_json),
+            fetched_at=fetched_at,
+            seasons_detail_fetched=bool(seasons_detail_fetched),
+        )
 
     def save(self, entry: CachedShowMetadata) -> None:
-        cache = self._load()
         entry = entry.model_copy(update={"fetched_at": datetime.now(tz=UTC).isoformat()})
-        cache.shows[str(entry.plex_show_id)] = entry
-        self._save(cache)
+        connection = self._connect()
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO shows (plex_show_id, metadata_json, fetched_at, seasons_detail_fetched)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(plex_show_id) DO UPDATE SET
+                    metadata_json = excluded.metadata_json,
+                    fetched_at = excluded.fetched_at,
+                    seasons_detail_fetched = excluded.seasons_detail_fetched
+                """,
+                (
+                    entry.plex_show_id,
+                    entry.metadata.model_dump_json(),
+                    entry.fetched_at,
+                    int(entry.seasons_detail_fetched),
+                ),
+            )
 
     def poster_path(self, tmdb_id: int) -> Path:
         return self._poster_dir / f"{tmdb_id}.img"
@@ -47,18 +75,54 @@ class MetadataCacheService:
         self._poster_dir.mkdir(parents=True, exist_ok=True)
         self.poster_path(tmdb_id).write_bytes(data)
 
-    def _load(self) -> _CacheFile:
-        if not self._cache_file.is_file():
-            return _CacheFile()
-        try:
-            data = json.loads(self._cache_file.read_text(encoding="utf-8"))
-            return _CacheFile.model_validate(data)
-        except (OSError, json.JSONDecodeError, ValueError):
-            return _CacheFile()
+    def _connect(self) -> sqlite3.Connection:
+        self._db_file.parent.mkdir(parents=True, exist_ok=True)
+        return sqlite3.connect(self._db_file)
 
-    def _save(self, cache: _CacheFile) -> None:
-        self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = cache.model_dump_json(indent=2)
-        temp_file = self._cache_file.with_suffix(".json.tmp")
-        temp_file.write_text(payload, encoding="utf-8")
-        temp_file.replace(self._cache_file)
+    def _ensure_schema(self) -> None:
+        connection = self._connect()
+        with connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shows (
+                    plex_show_id INTEGER PRIMARY KEY,
+                    metadata_json TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL DEFAULT '',
+                    seasons_detail_fetched INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+
+    def _migrate_legacy_cache(self) -> None:
+        """One-time import of the old tmdb_cache.json into the database, then rename it aside."""
+
+        if not self._legacy_cache_file.is_file():
+            return
+
+        try:
+            data = json.loads(self._legacy_cache_file.read_text(encoding="utf-8"))
+            raw_entries: dict[str, object] = data.get("shows", {})
+        except (OSError, json.JSONDecodeError, ValueError):
+            raw_entries = {}
+
+        connection = self._connect()
+        with connection:
+            for raw_entry in raw_entries.values():
+                try:
+                    cached = CachedShowMetadata.model_validate(raw_entry)
+                except ValueError:
+                    continue
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO shows (plex_show_id, metadata_json, fetched_at, seasons_detail_fetched)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        cached.plex_show_id,
+                        cached.metadata.model_dump_json(),
+                        cached.fetched_at,
+                        int(cached.seasons_detail_fetched),
+                    ),
+                )
+
+        self._legacy_cache_file.replace(self._legacy_cache_file.with_suffix(".json.migrated"))
