@@ -102,11 +102,19 @@ Show/season table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_
 - On `set_shows()`, a background `_ShowMetadataFetchWorker` (via `ShowMetadataProvider`) fetches
   each show's TMDb season summary (cache-first) and fills the **TMDb Seasons** column as results
   stream in; skipped entirely when no TMDb API key is configured (`has_api_key()`)
-- A row's font is tinted `_MISMATCH_TEXT_COLOR` (all cells, via `_set_row_season_mismatch`, using
-  `setForeground`) when `metadata.number_of_seasons != show.season_count`; reset with a bare
-  `QBrush()` so the normal/alternating text color resumes — don't compare anything other than these
-  two displayed numbers, and don't switch this back to `setBackground` (background tinting was
-  deliberately replaced with font-color tinting)
+- A row's font is tinted (all cells, via `_set_row_completeness`, using `setForeground`) based on
+  **completeness**, computed by the module-level `_show_completeness(plex_seasons, metadata)`
+  comparing Plex's and TMDb's per-season episode counts, season 0 (specials) excluded from both
+  sides: `_MISMATCH_TEXT_COLOR` (orange) if a real TMDb season (>= 1) has no matching Plex season at
+  all, else `_MISSING_EPISODES_TEXT_COLOR` (yellow) if all real seasons exist but one's Plex episode
+  count doesn't match TMDb's, else a bare `QBrush()` (normal/alternating text color) when complete —
+  don't switch this back to `setBackground` (background tinting was deliberately replaced with
+  font-color tinting)
+- Plex's side of that comparison (`self._plex_season_episode_counts: dict[show_id, dict[season_number,
+  episode_count]]`) is fetched once per library load via `LibraryDbService.get_show_episode_counts()`
+  (one query for the whole section) and passed into `set_shows()` alongside the show list — not
+  fetched per row, and not the same as `TvShowSummary.season_count` (a flat count used only for the
+  **Seasons** display column, no longer used for tinting)
 - Clicking the **⟳** cell (`_SHOW_REFRESH_COLUMN`) calls `_request_hard_refresh`, which re-runs the
   same worker with `force_refresh=True` — this bypasses the cache for that one show only and also
   emits `show_metadata_refreshed`, which `TvLibraryTreeWidget` uses to live-update the detail panel
@@ -141,7 +149,9 @@ Show/season table column indices are named constants (`_SHOW_REFRESH_COLUMN`, `_
   below
 - Mismatch (for real seasons only) is **font color**, same as the show grid — `_set_row_episode_mismatch()`
   uses `item.setForeground(QBrush(_MISMATCH_TEXT_COLOR))` (orange), reset via a bare `QBrush()`. The
-  show grid's `_set_row_season_mismatch()` shares the same constant — keep both in sync if it changes
+  show grid's `_set_row_completeness()` shares the same constant for its own "missing_seasons" state —
+  keep both in sync if it changes. Unlike the show grid, this per-season mismatch check does not
+  exclude season 0 — that exclusion is a show-level completeness rule, not a season-grid one
 - If TMDb data arrives (or changes) *after* a season table is already open, `update_show_metadata()`
   locates the live `SeasonTableWidget` via `_season_table_for_show()` and calls
   `season_table.update_tmdb_seasons(...)`, which **fully rebuilds** the row set (recomputes the merge,

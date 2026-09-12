@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor
@@ -51,6 +51,7 @@ _SEASON_NAME_COLUMN = 1
 _SEASON_EPISODE_COUNT_COLUMN = 2
 _SEASON_TMDB_EPISODE_COLUMN = 3
 _MISMATCH_TEXT_COLOR = QColor(255, 140, 0)
+_MISSING_EPISODES_TEXT_COLOR = QColor(204, 172, 0)
 _MISSING_TEXT_COLOR = QColor(198, 40, 40)
 # Synthetic TvSeasonRecord.id for a season TMDb reports that has no Plex season at all.
 # Plex metadata_items ids are always positive, so a large negative offset can't collide.
@@ -213,6 +214,34 @@ def _shift_expanded_rows(expanded_rows: dict[int, int], pivot: int, delta: int) 
         updated[new_key] = new_detail
     expanded_rows.clear()
     expanded_rows.update(updated)
+
+
+_ShowCompletenessState = Literal["complete", "missing_seasons", "missing_episodes"]
+
+
+def _show_completeness(
+    plex_seasons: dict[int, int],
+    metadata: TvShowMetadata,
+) -> _ShowCompletenessState:
+    """Compare Plex's and TMDb's per-season episode counts, ignoring season 0 (specials) on both sides.
+
+    A season 0 present on only one side is never treated as missing; only real seasons (>= 1) drive
+    "missing_seasons" (orange) and "missing_episodes" (yellow).
+    """
+
+    tmdb_seasons = {
+        season.season_number: season.episode_count
+        for season in metadata.seasons
+        if season.season_number is not None
+    }
+    plex_real = {number: count for number, count in plex_seasons.items() if number != 0}
+    tmdb_real = {number: count for number, count in tmdb_seasons.items() if number != 0}
+
+    if set(tmdb_real) - set(plex_real):
+        return "missing_seasons"
+    if any(tmdb_real[number] != plex_real.get(number, 0) for number in tmdb_real):
+        return "missing_episodes"
+    return "complete"
 
 
 class _EpisodeRow(NamedTuple):
@@ -686,6 +715,7 @@ class ShowTableWidget(QTableWidget):
         self._db_path = db_path
         self._metadata_provider = metadata_provider
         self._shows: list[TvShowSummary] = []
+        self._plex_season_episode_counts: dict[int, dict[int, int]] = {}
         self._expanded_rows: dict[int, int] = {}
         self._detail_threads: dict[int, QThread] = {}
         self._detail_workers: dict[int, _TvShowDetailsWorker] = {}
@@ -771,10 +801,15 @@ class ShowTableWidget(QTableWidget):
         self._episode_header_state = state
         self._notify_layout_changed()
 
-    def set_shows(self, shows: list[TvShowSummary]) -> None:
+    def set_shows(
+        self,
+        shows: list[TvShowSummary],
+        plex_season_episode_counts: dict[int, dict[int, int]] | None = None,
+    ) -> None:
         self.clear_workers()
         self._expanded_rows.clear()
         self._shows = shows
+        self._plex_season_episode_counts = plex_season_episode_counts or {}
         has_api_key = self._metadata_provider is not None and self._metadata_provider.has_api_key()
         self.setRowCount(len(shows))
         for row, show in enumerate(shows):
@@ -942,7 +977,6 @@ class ShowTableWidget(QTableWidget):
         row = self._find_row_for_show(show_id)
         if row is None:
             return
-        show = self._show_for_row(row)
 
         item = self.item(row, _SHOW_TMDB_SEASON_COLUMN)
         if item is None:
@@ -955,11 +989,16 @@ class ShowTableWidget(QTableWidget):
             "TMDb seasons: " + ", ".join(str(number) for number in season_numbers) if season_numbers else ""
         )
 
-        mismatch = show is not None and tmdb_count is not None and tmdb_count != show.season_count
-        self._set_row_season_mismatch(row, mismatch)
+        plex_seasons = self._plex_season_episode_counts.get(show_id, {})
+        self._set_row_completeness(row, _show_completeness(plex_seasons, metadata))
 
-    def _set_row_season_mismatch(self, row: int, mismatch: bool) -> None:
-        brush = QBrush(_MISMATCH_TEXT_COLOR) if mismatch else QBrush()
+    def _set_row_completeness(self, row: int, state: _ShowCompletenessState) -> None:
+        if state == "missing_seasons":
+            brush = QBrush(_MISMATCH_TEXT_COLOR)
+        elif state == "missing_episodes":
+            brush = QBrush(_MISSING_EPISODES_TEXT_COLOR)
+        else:
+            brush = QBrush()
         for column in range(self.columnCount()):
             item = self.item(row, column)
             if item is not None:
@@ -1089,7 +1128,7 @@ class ShowTableWidget(QTableWidget):
 
 
 class _TvShowLoadWorker(QObject):
-    succeeded = Signal(list)
+    succeeded = Signal(list, object)
     failed = Signal(str)
 
     def __init__(
@@ -1115,12 +1154,15 @@ class _TvShowLoadWorker(QObject):
                 sort_by=self._sort_by,
                 sort_desc=self._sort_desc,
             )
+            season_episode_counts = self._library_db_service.get_show_episode_counts(
+                self._library_section_id, self._db_path
+            )
         except LibraryDbError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:
             self.failed.emit(f"Unexpected error: {exc}")
         else:
-            self.succeeded.emit(shows)
+            self.succeeded.emit(shows, season_episode_counts)
 
 
 class TvLibraryTreeWidget(QWidget):
@@ -1314,7 +1356,11 @@ class TvLibraryTreeWidget(QWidget):
         self._show_thread = None
         self._show_worker = None
 
-    def _on_shows_loaded(self, shows: list[TvShowSummary]) -> None:
+    def _on_shows_loaded(
+        self,
+        shows: list[TvShowSummary],
+        season_episode_counts: dict[int, dict[int, int]],
+    ) -> None:
         if not shows:
             self._destroy_show_table()
             self._placeholder.setText("No TV shows were found in this library.")
@@ -1322,7 +1368,7 @@ class TvLibraryTreeWidget(QWidget):
             return
 
         show_table = self._ensure_show_table()
-        show_table.set_shows(shows)
+        show_table.set_shows(shows, season_episode_counts)
         self._placeholder.hide()
         show_table.show()
 

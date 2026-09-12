@@ -173,6 +173,52 @@ class LibraryDbService:
             for row in rows
         ]
 
+    def get_show_episode_counts(self, library_section_id: int, db_path: Path) -> dict[int, dict[int, int]]:
+        """Plex episode counts by season number, for every show in a library section.
+
+        One query for the whole library, so the show grid can judge per-show completeness
+        (missing seasons/episodes) without a per-row database round trip.
+        """
+
+        if not db_path.is_file():
+            raise LibraryDbError(f"Database file not found: {db_path}")
+
+        query = f"""
+            SELECT
+                shows.id AS show_id,
+                seasons.[index] AS season_number,
+                episodes.id AS episode_id
+            FROM metadata_items shows
+            JOIN metadata_items seasons
+              ON seasons.parent_id = shows.id
+             AND seasons.metadata_type = {PLEX_METADATA_TYPE_SEASON}
+            LEFT JOIN metadata_items episodes
+              ON episodes.parent_id = seasons.id
+             AND episodes.metadata_type = {PLEX_METADATA_TYPE_EPISODE}
+            WHERE shows.library_section_id = ?
+              AND shows.metadata_type = {PLEX_METADATA_TYPE_SHOW}
+              AND (shows.parent_id IS NULL OR shows.parent_id = 0)
+        """
+
+        try:
+            connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            with connection:
+                rows = connection.execute(query, (library_section_id,)).fetchall()
+        except sqlite3.Error as exc:
+            raise LibraryDbError(f"Failed to read season episode counts from {db_path}: {exc}") from exc
+
+        counts: dict[int, dict[int, int]] = {}
+        for row in rows:
+            if row["season_number"] is None:
+                continue
+            season_number = int(row["season_number"])
+            show_seasons = counts.setdefault(int(row["show_id"]), {})
+            show_seasons.setdefault(season_number, 0)
+            if row["episode_id"] is not None:
+                show_seasons[season_number] += 1
+        return counts
+
     def get_show_seasons_and_episodes(self, show_id: int, db_path: Path) -> list[TvSeasonRecord]:
         """Return seasons and episodes for one TV series."""
 
