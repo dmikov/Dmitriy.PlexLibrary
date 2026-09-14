@@ -1,9 +1,8 @@
-"""Ensures a fresh local Plex database file and reads library sections from it."""
+"""Ensures a local Plex database file exists and reads library sections from it."""
 
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from plexlibrary.models.library import LibrarySection
@@ -18,8 +17,6 @@ from plexlibrary.models.tv import (
 from plexlibrary.services.database_downloader import create_downloader
 from plexlibrary.services.settings_service import SettingsService
 
-DEFAULT_MAX_AGE = timedelta(days=1)
-
 _DOWNLOADED_DB_FILE_NAME = "downloaded_library.db"
 
 
@@ -30,18 +27,8 @@ class LibraryDbError(RuntimeError):
 class LibraryDbService:
     """Downloads or reuses a local Plex database and queries library metadata from it."""
 
-    def __init__(
-        self,
-        settings_service: SettingsService,
-        *,
-        max_age: timedelta = DEFAULT_MAX_AGE,
-    ) -> None:
+    def __init__(self, settings_service: SettingsService) -> None:
         self._settings_service = settings_service
-        self._max_age = max_age
-
-    @property
-    def max_age(self) -> timedelta:
-        return self._max_age
 
     @property
     def database_path(self) -> Path:
@@ -49,14 +36,14 @@ class LibraryDbService:
         return self._settings_service.config_dir / _DOWNLOADED_DB_FILE_NAME
 
     def ensure_local_database(self, *, force: bool = False) -> Path:
-        """Return a local database path, downloading again when missing, stale, or `force` is set."""
+        """Return a local database path, downloading again when missing or `force` is set."""
 
         app_settings = self._settings_service.load()
         if app_settings.connection is None:
             raise LibraryDbError("Configure a connection in Settings before loading libraries.")
 
         destination = self.database_path
-        if not force and destination.is_file() and self._is_fresh(destination):
+        if not force and destination.is_file():
             return destination
 
         password = self._settings_service.load_password(app_settings.connection)
@@ -283,11 +270,6 @@ class LibraryDbService:
             seasons.values(),
             key=lambda season: season.season_number if season.season_number is not None else -1,
         )
-
-    def _is_fresh(self, path: Path) -> bool:
-        modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-        return datetime.now(tz=UTC) - modified_at < self._max_age
-
 
 def _format_resolution(width: object, height: object) -> str:
     if width is None or height is None:
